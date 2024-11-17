@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use zbus::zvariant::{ObjectPath, OwnedValue, Value};
+use zbus::zvariant::{Error, ObjectPath, OwnedValue, Value};
 
 pub mod dbus_menu_proxy;
 pub mod notifier_item_proxy;
@@ -16,9 +16,17 @@ impl DBusProps {
     pub fn get<'a, T>(&'a self, key: &str) -> Option<&'a T>
     where
         T: ?Sized,
+        // &'a T: TryFrom<&'a Value<'a>>,
+        // kjpkj
         &'a T: TryFrom<&'a Value<'a>>,
+        <&'a T as TryFrom<&'a Value<'a>>>::Error: Into<Error>,
     {
-        self.0.get(key).and_then(|value| value.downcast_ref::<T>())
+        let v = self.0.get(key)?;
+        println!("get {key} {v:?}");
+        println!("{:?}", v.downcast_ref::<&str>());
+        let a: &'a T = v.downcast_ref().unwrap();
+        Some(a)
+        // .and_then(|value| Some(value.downcast_ref::<T>()))
     }
 
     /// Gets `key` from the map if present,
@@ -42,7 +50,8 @@ pub(crate) trait OwnedValueExt {
 
 impl OwnedValueExt for OwnedValue {
     fn to_string(&self) -> Option<String> {
-        self.downcast_ref::<str>().map(ToString::to_string)
+        let a = self.downcast_ref::<&str>().unwrap();
+        Some(a.to_string())
     }
 }
 

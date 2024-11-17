@@ -1,11 +1,12 @@
 use crate::names;
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
-use zbus::{
-    dbus_interface, export::ordered_stream::OrderedStreamExt, Connection, Interface, MessageHeader,
-    SignalContext,
-};
+use zbus::message::Header;
+use zbus::object_server::Interface;
+use zbus::object_server::SignalContext;
+use zbus::{export::ordered_stream::OrderedStreamExt, interface, Connection};
 
 /// An instance of [`org.kde.StatusNotifierWatcher`]. It only tracks what tray items and trays
 /// exist, and doesn't have any logic for displaying items (for that, see [`Host`][`crate::Host`]).
@@ -25,13 +26,13 @@ pub struct StatusNotifierWatcher {
 ///
 /// Methods and properties correspond to methods and properties on the DBus service that can be
 /// used by others, while signals are events that we generate that other services listen to.
-#[dbus_interface(name = "org.kde.StatusNotifierWatcher")]
+#[interface(name = "org.kde.StatusNotifierWatcher")]
 impl StatusNotifierWatcher {
     /// RegisterStatusNotifierHost method
     async fn register_status_notifier_host(
         &mut self,
         service: &str,
-        #[zbus(header)] hdr: MessageHeader<'_>,
+        #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
@@ -96,15 +97,15 @@ impl StatusNotifierWatcher {
     }
 
     /// StatusNotifierHostRegistered signal.
-    #[dbus_interface(signal)]
+    #[zbus(signal)]
     async fn status_notifier_host_registered(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
 
     /// StatusNotifierHostUnregistered signal
-    #[dbus_interface(signal)]
+    #[zbus(signal)]
     async fn status_notifier_host_unregistered(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
 
     /// IsStatusNotifierHostRegistered property
-    #[dbus_interface(property)]
+    #[zbus(property)]
     fn is_status_notifier_host_registered(&self) -> bool {
         let hosts = self.hosts.lock().expect("mutex lock should succeed");
         !hosts.is_empty()
@@ -114,7 +115,7 @@ impl StatusNotifierWatcher {
     async fn register_status_notifier_item(
         &mut self,
         service: &str,
-        #[zbus(header)] hdr: MessageHeader<'_>,
+        #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
         #[zbus(signal_context)] ctxt: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
@@ -171,7 +172,7 @@ impl StatusNotifierWatcher {
     async fn unregister_status_notifier_item(
         &mut self,
         service: &str,
-        #[zbus(header)] hdr: MessageHeader<'_>,
+        #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
         #[zbus(signal_context)] context: SignalContext<'_>,
     ) -> zbus::fdo::Result<()> {
@@ -195,28 +196,28 @@ impl StatusNotifierWatcher {
     }
 
     /// StatusNotifierItemRegistered signal
-    #[dbus_interface(signal)]
+    #[zbus(signal)]
     async fn status_notifier_item_registered(
-        ctxt: &zbus::SignalContext<'_>,
+        ctxt: &SignalContext<'_>,
         service: &str,
     ) -> zbus::Result<()>;
 
     /// StatusNotifierItemUnregistered signal
-    #[dbus_interface(signal)]
+    #[zbus(signal)]
     async fn status_notifier_item_unregistered(
-        ctxt: &zbus::SignalContext<'_>,
+        ctxt: &SignalContext<'_>,
         service: &str,
     ) -> zbus::Result<()>;
 
     /// RegisteredStatusNotifierItems property
-    #[dbus_interface(property)]
+    #[zbus(property)]
     fn registered_status_notifier_items(&self) -> Vec<String> {
         let items = self.items.lock().expect("mutex lock should succeed");
         items.iter().cloned().collect()
     }
 
     /// ProtocolVersion property
-    #[dbus_interface(property)]
+    #[zbus(property)]
     fn protocol_version(&self) -> i32 {
         0
     }
@@ -256,8 +257,8 @@ impl StatusNotifierWatcher {
         zbus::fdo::Properties::properties_changed(
             ctxt,
             Self::name(),
-            &std::collections::HashMap::new(),
-            &["IsStatusNotifierHostRegistered"],
+            std::collections::HashMap::new(),
+            Cow::Borrowed(&["IsStatusNotifierHostRegistered"]),
         )
         .await
     }
@@ -269,8 +270,8 @@ impl StatusNotifierWatcher {
         zbus::fdo::Properties::properties_changed(
             ctxt,
             Self::name(),
-            &std::collections::HashMap::new(),
-            &["RegisteredStatusNotifierItems"],
+            std::collections::HashMap::new(),
+            Cow::Borrowed(&["RegisteredStatusNotifierItems"]),
         )
         .await
     }
@@ -285,12 +286,12 @@ impl StatusNotifierWatcher {
 /// status items pass non-conforming values. One common one is just the object path.
 async fn parse_service<'a>(
     service: &'a str,
-    hdr: MessageHeader<'_>,
+    hdr: Header<'_>,
     con: &Connection,
 ) -> zbus::fdo::Result<(zbus::names::UniqueName<'static>, &'a str)> {
     if service.starts_with('/') {
         // they sent us just the object path
-        if let Some(sender) = hdr.sender()? {
+        if let Some(sender) = hdr.sender() {
             Ok((sender.to_owned(), service))
         } else {
             warn!("unknown sender");
