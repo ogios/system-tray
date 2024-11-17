@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 use zbus::message::Header;
 use zbus::object_server::Interface;
-use zbus::object_server::SignalContext;
+use zbus::object_server::SignalEmitter;
 use zbus::{export::ordered_stream::OrderedStreamExt, interface, Connection};
 
 /// An instance of [`org.kde.StatusNotifierWatcher`]. It only tracks what tray items and trays
@@ -34,7 +34,7 @@ impl StatusNotifierWatcher {
         service: &str,
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
-        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         // TODO: right now, we convert everything to the unique bus name (something like :1.234).
         //  However, it might make more sense to listen to the actual name they give us, so that if
@@ -56,14 +56,14 @@ impl StatusNotifierWatcher {
         };
 
         if added_first {
-            self.is_status_notifier_host_registered_changed(&ctxt)
+            self.is_status_notifier_host_registered_changed(&signal_emitter)
                 .await?;
         }
-        StatusNotifierWatcher::status_notifier_host_registered(&ctxt).await?;
+        StatusNotifierWatcher::status_notifier_host_registered(&signal_emitter).await?;
 
         self.tasks.spawn({
             let hosts = self.hosts.clone();
-            let ctxt = ctxt.to_owned();
+            let signal_emitter = signal_emitter.to_owned();
             let con = con.to_owned();
             async move {
                 if let Err(e) = wait_for_service_exit(&con, service.as_ref().into()).await {
@@ -79,14 +79,16 @@ impl StatusNotifierWatcher {
 
                 if removed_last {
                     if let Err(e) =
-                        StatusNotifierWatcher::is_status_notifier_host_registered_refresh(&ctxt)
-                            .await
+                        StatusNotifierWatcher::is_status_notifier_host_registered_refresh(
+                            &signal_emitter,
+                        )
+                        .await
                     {
                         error!("failed to signal Watcher: {}", e);
                     }
                 }
                 if let Err(e) =
-                    StatusNotifierWatcher::status_notifier_host_unregistered(&ctxt).await
+                    StatusNotifierWatcher::status_notifier_host_unregistered(&signal_emitter).await
                 {
                     error!("failed to signal Watcher: {}", e);
                 }
@@ -98,11 +100,15 @@ impl StatusNotifierWatcher {
 
     /// StatusNotifierHostRegistered signal.
     #[zbus(signal)]
-    async fn status_notifier_host_registered(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
+    async fn status_notifier_host_registered(
+        signal_emitter: &SignalEmitter<'_>,
+    ) -> zbus::Result<()>;
 
     /// StatusNotifierHostUnregistered signal
     #[zbus(signal)]
-    async fn status_notifier_host_unregistered(ctxt: &SignalContext<'_>) -> zbus::Result<()>;
+    async fn status_notifier_host_unregistered(
+        signal_emitter: &SignalEmitter<'_>,
+    ) -> zbus::Result<()>;
 
     /// IsStatusNotifierHostRegistered property
     #[zbus(property)]
@@ -117,7 +123,7 @@ impl StatusNotifierWatcher {
         service: &str,
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
-        #[zbus(signal_context)] ctxt: SignalContext<'_>,
+        #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         let (service, objpath) = parse_service(service, hdr, con).await?;
         let service = zbus::names::BusName::Unique(service);
@@ -134,12 +140,14 @@ impl StatusNotifierWatcher {
         }
         info!("new item: {}", item);
 
-        self.registered_status_notifier_items_changed(&ctxt).await?;
-        StatusNotifierWatcher::status_notifier_item_registered(&ctxt, item.as_ref()).await?;
+        self.registered_status_notifier_items_changed(&signal_emitter)
+            .await?;
+        StatusNotifierWatcher::status_notifier_item_registered(&signal_emitter, item.as_ref())
+            .await?;
 
         self.tasks.spawn({
             let items = self.items.clone();
-            let ctxt = ctxt.to_owned();
+            let signal_emitter = signal_emitter.to_owned();
             let con = con.to_owned();
             async move {
                 if let Err(e) = wait_for_service_exit(&con, service.as_ref()).await {
@@ -153,13 +161,16 @@ impl StatusNotifierWatcher {
                 }
 
                 if let Err(e) =
-                    StatusNotifierWatcher::registered_status_notifier_items_refresh(&ctxt).await
+                    StatusNotifierWatcher::registered_status_notifier_items_refresh(&signal_emitter)
+                        .await
                 {
                     error!("failed to signal Watcher: {}", e);
                 }
-                if let Err(e) =
-                    StatusNotifierWatcher::status_notifier_item_unregistered(&ctxt, item.as_ref())
-                        .await
+                if let Err(e) = StatusNotifierWatcher::status_notifier_item_unregistered(
+                    &signal_emitter,
+                    item.as_ref(),
+                )
+                .await
                 {
                     error!("failed to signal Watcher: {}", e);
                 }
@@ -174,7 +185,7 @@ impl StatusNotifierWatcher {
         service: &str,
         #[zbus(header)] hdr: Header<'_>,
         #[zbus(connection)] con: &Connection,
-        #[zbus(signal_context)] context: SignalContext<'_>,
+        #[zbus(signal_emitter)] context: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         debug!("received item unregister: {service}");
 
@@ -198,14 +209,14 @@ impl StatusNotifierWatcher {
     /// StatusNotifierItemRegistered signal
     #[zbus(signal)]
     async fn status_notifier_item_registered(
-        ctxt: &SignalContext<'_>,
+        signal_emitter: &SignalEmitter<'_>,
         service: &str,
     ) -> zbus::Result<()>;
 
     /// StatusNotifierItemUnregistered signal
     #[zbus(signal)]
     async fn status_notifier_item_unregistered(
-        ctxt: &SignalContext<'_>,
+        signal_emitter: &SignalEmitter<'_>,
         service: &str,
     ) -> zbus::Result<()>;
 
@@ -252,10 +263,10 @@ impl StatusNotifierWatcher {
     /// Equivalent to `is_status_notifier_host_registered_invalidate`, but without requiring
     /// `self`.
     async fn is_status_notifier_host_registered_refresh(
-        ctxt: &SignalContext<'_>,
+        signal_emitter: &SignalEmitter<'_>,
     ) -> zbus::Result<()> {
         zbus::fdo::Properties::properties_changed(
-            ctxt,
+            signal_emitter,
             Self::name(),
             std::collections::HashMap::new(),
             Cow::Borrowed(&["IsStatusNotifierHostRegistered"]),
@@ -265,10 +276,10 @@ impl StatusNotifierWatcher {
 
     /// Equivalent to `registered_status_notifier_items_invalidate`, but without requiring `self`.
     async fn registered_status_notifier_items_refresh(
-        ctxt: &SignalContext<'_>,
+        signal_emitter: &SignalEmitter<'_>,
     ) -> zbus::Result<()> {
         zbus::fdo::Properties::properties_changed(
-            ctxt,
+            signal_emitter,
             Self::name(),
             std::collections::HashMap::new(),
             Cow::Borrowed(&["RegisteredStatusNotifierItems"]),
