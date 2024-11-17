@@ -4,6 +4,15 @@ An async implementation of the `StatusNotifierItem` and `DbusMenu` protocols for
 
 Requires Tokio.
 
+> [!NOTE]
+>
+> ZBus API changed a lot from 3.x to 5.x  
+> This is one fork to help with that
+>
+> idk if the origin needs it since it's still working pretty well under 3.x  
+> but one of my personal projects already updated to zbus over 5.x, and it needs system tray, so here we are.
+
+
 ## Example
 
 ```rust
