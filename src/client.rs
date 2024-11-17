@@ -333,7 +333,7 @@ impl Client {
         loop {
             tokio::select! {
                 Some(change) = props_changed.next() => {
-                    if let Some(event) = Self::get_update_event(Arc::new(change), &properties_proxy).await {
+                    if let Some(event) = Self::get_update_event(change, &properties_proxy).await {
                         debug!("[{destination}{path}] received property change: {event:?}");
                         tx.send(Event::Update(destination.to_string(), event))?;
                     }
@@ -366,7 +366,7 @@ impl Client {
 
     /// Gets the update event for a `DBus` properties change message.
     async fn get_update_event(
-        change: Arc<Message>,
+        change: Message,
         properties_proxy: &PropertiesProxy<'_>,
     ) -> Option<UpdateEvent> {
         let header = change.header();
