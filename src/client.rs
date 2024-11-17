@@ -405,19 +405,20 @@ impl Client {
             "NewAttentionIcon" => Some(AttentionIcon(property.to_string())),
             "NewIcon" => Some(Icon(property.to_string())),
             "NewOverlayIcon" => Some(OverlayIcon(property.to_string())),
-            "NewStatus" => Some(Status({
-                let a = property.downcast_ref::<&str>().unwrap();
-                item::Status::from(a)
-                // .map(item::Status::from)
-                // .unwrap_or_default()
-            })),
+            "NewStatus" => Some(Status(
+                property
+                    .downcast_ref::<&str>()
+                    .ok()
+                    .map(item::Status::from)
+                    .unwrap_or_default(),
+            )),
             "NewTitle" => Some(Title(property.to_string())),
             "NewToolTip" => Some(Tooltip({
-                let a = property.downcast_ref::<&Structure>().unwrap();
-                let b = crate::item::Tooltip::try_from(a).unwrap();
-                Some(b)
-                // .map(crate::item::Tooltip::try_from)?
-                // .ok()
+                property
+                    .downcast_ref::<&Structure>()
+                    .ok()
+                    .map(crate::item::Tooltip::try_from)?
+                    .ok()
             })),
             _ => {
                 warn!("received unhandled update event: {member}");

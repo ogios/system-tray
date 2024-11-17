@@ -2,7 +2,7 @@ use crate::dbus::DBusProps;
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::fmt::{Debug, Formatter};
-use zbus::zvariant::{Array, Structure, Value};
+use zbus::zvariant::{Array, ArraySeed, Structure, Value};
 
 /// Represents an item to display inside the tray.
 /// <https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/StatusNotifierItem/>
@@ -149,42 +149,37 @@ impl IconPixmap {
         array
             .iter()
             .map(|pixmap| {
-                let structure = pixmap.downcast_ref::<Structure>()?;
+                let structure = pixmap.downcast_ref::<&Structure>();
                 let fields = structure
                     // .ok_or(Error::InvalidData("invalid or missing structure data"))?
+                    // NOTE: Error::InvalidData needs a static string, idk if it's ok to modify it
+                    // .map_err(|e| Error::InvalidData(&e.to_string()))?
+                    .map_err(|_| Error::InvalidData("invalid or missing structure data"))?
                     .fields();
 
                 let width = fields
                     .first()
-                    .and_then(|v| {
-                        let a = Value::downcast_ref::<&i32>(v).unwrap();
-                        Some(a)
-                    })
+                    .and_then(|v| Value::downcast_ref::<&i32>(v).ok())
                     .copied()
                     .ok_or(Error::InvalidData("invalid or missing width"))?;
 
                 let height = fields
                     .get(1)
-                    .and_then(|v| {
-                        let a = Value::downcast_ref::<&i32>(v).unwrap();
-                        Some(a)
-                    })
+                    .and_then(|v| Value::downcast_ref::<&i32>(v).ok())
                     .copied()
                     .ok_or(Error::InvalidData("invalid or missing height"))?;
 
                 let pixel_values = fields
                     .get(2)
-                    .and_then(|v| {
-                        let a = Value::downcast_ref::<&Array>(v).unwrap();
-                        Some(a)
-                    })
+                    .and_then(|v| Value::downcast_ref::<&Array>(v).ok())
                     .ok_or(Error::InvalidData("invalid or missing pixel values"))?;
 
                 let pixels = pixel_values
                     .iter()
                     .map(|p| {
                         p.downcast_ref::<&u8>()
-                            .map_err(|e| Error::InvalidData("invalid pixel value"))
+                            // NOTE: same error situation here
+                            .map_err(|_| Error::InvalidData("invalid pixel value"))
                             .copied()
                     })
                     .collect::<Result<_>>()?;
@@ -218,37 +213,25 @@ impl TryFrom<&Structure<'_>> for Tooltip {
         Ok(Self {
             icon_name: fields
                 .first()
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&str>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&str>(v).ok())
                 .map(ToString::to_string)
                 .ok_or(Error::InvalidData("icon_name"))?,
 
             icon_data: fields
                 .get(1)
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&Array>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&Array>(v).ok())
                 .map(IconPixmap::from_array)
                 .ok_or(Error::InvalidData("icon_data"))??,
 
             title: fields
                 .get(2)
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&str>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&str>(v).ok())
                 .map(ToString::to_string)
                 .ok_or(Error::InvalidData("title"))?,
 
             description: fields
                 .get(3)
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&str>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&str>(v).ok())
                 .map(ToString::to_string)
                 .ok_or(Error::InvalidData("description"))?,
         })
@@ -264,7 +247,8 @@ impl TryFrom<DBusProps> for StatusNotifierItem {
                 id,
                 title: props.get_string("Title"),
                 status: props.get_status(),
-                window_id: props.get::<i32>("WindowId").copied().unwrap_or_default() as u32,
+                // window_id: props.get::<i32>("WindowId").copied().unwrap_or_default() as u32,
+                window_id: props.get::<u32>("WindowId").copied().unwrap_or_default(),
                 icon_theme_path: props.get_string("IconThemePath"),
                 icon_name: props.get_string("IconName"),
                 icon_pixmap: props.get_icon_pixmap("IconPixmap"),

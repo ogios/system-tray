@@ -12,7 +12,6 @@
 
 use std::collections::HashMap;
 
-// use zbus::dbus_proxy;
 use zbus::proxy;
 use zbus::zvariant::{OwnedValue, Value};
 

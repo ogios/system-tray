@@ -222,7 +222,6 @@ impl TryFrom<&OwnedValue> for MenuItem {
 
     fn try_from(value: &OwnedValue) -> Result<Self> {
         let structure = value.downcast_ref::<&Structure>()?;
-        // .ok_or(Error::ZBusVariant(zvariant::Error::IncorrectType))?;
 
         let mut fields = structure.fields().iter();
 
@@ -296,8 +295,7 @@ impl TryFrom<&OwnedValue> for MenuItem {
         if let Some(Value::Array(array)) = fields.next() {
             let mut submenu = vec![];
             for value in array.iter() {
-                let value = value.try_to_owned()?;
-                // let value = OwnedValue::from(value);
+                let value = OwnedValue::try_from(value)?;
                 let menu = MenuItem::try_from(&value)?;
                 submenu.push(menu);
             }
@@ -345,10 +343,10 @@ impl TryFrom<UpdatedProps<'_>> for MenuItemUpdate {
     fn try_from(value: UpdatedProps) -> Result<Self> {
         let dict = value.fields;
 
-        let icon_data = if let Some(arr) = dict.get("icon-data").and_then(|v| {
-            let a = Value::downcast_ref::<&Array>(v).unwrap();
-            Some(a)
-        }) {
+        let icon_data = if let Some(arr) = dict
+            .get("icon-data")
+            .and_then(|v| Value::downcast_ref::<&Array>(v).ok())
+        {
             Some(Some(get_icon_data(arr)?))
         } else {
             None
@@ -361,18 +359,12 @@ impl TryFrom<UpdatedProps<'_>> for MenuItemUpdate {
 
             enabled: dict
                 .get("enabled")
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&bool>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&bool>(v).ok())
                 .copied(),
 
             visible: dict
                 .get("visible")
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&bool>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&bool>(v).ok())
                 .copied(),
 
             icon_name: dict
@@ -383,18 +375,12 @@ impl TryFrom<UpdatedProps<'_>> for MenuItemUpdate {
 
             toggle_state: dict
                 .get("toggle-state")
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&i32>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&i32>(v).ok())
                 .map(|value| ToggleState::from(*value)),
 
             disposition: dict
                 .get("disposition")
-                .and_then(|v| {
-                    let a = Value::downcast_ref::<&str>(v).unwrap();
-                    Some(a)
-                })
+                .and_then(|v| Value::downcast_ref::<&str>(v).ok())
                 .map(Disposition::from),
         })
     }
