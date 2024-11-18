@@ -2,7 +2,6 @@ use crate::dbus::dbus_menu_proxy::{MenuLayout, PropertiesUpdate, UpdatedProps};
 use crate::error::{Error, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
-use zbus::zvariant;
 use zbus::zvariant::{Array, OwnedValue, Structure, Value};
 
 /// A menu that should be displayed when clicking corresponding tray icon
