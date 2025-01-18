@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "system-tray"
-version = "0.4.0"
+version = "0.6.0"
 dependencies = [
  "calloop",
  "dbusmenu-gtk3-sys",
