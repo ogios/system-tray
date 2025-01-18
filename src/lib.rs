@@ -38,6 +38,9 @@ pub mod item;
 /// `DBusMenu` menu representation.
 pub mod menu;
 
+/// Events
+pub mod event;
+
 #[cfg(feature = "dbusmenu-gtk3")]
 pub mod gtk_menu;
 

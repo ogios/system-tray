@@ -4,8 +4,8 @@ use crate::dbus::notifier_watcher_proxy::StatusNotifierWatcherProxy;
 use crate::dbus::status_notifier_watcher::StatusNotifierWatcher;
 use crate::dbus::{self, OwnedValueExt};
 use crate::error::Error;
-use crate::item::{self, Status, StatusNotifierItem, Tooltip};
-use crate::menu::{MenuDiff, TrayMenu};
+use crate::item::{self, StatusNotifierItem};
+use crate::menu::TrayMenu;
 use crate::names;
 use dbus::DBusProps;
 use std::collections::HashMap;
@@ -23,62 +23,9 @@ use zbus::{Connection, Message};
 
 use self::names::ITEM_OBJECT;
 
-/// An event emitted by the client
-/// representing a change from either the `StatusNotifierItem`
-/// or `DBusMenu` protocols.
-#[derive(Debug, Clone)]
-pub enum Event {
-    /// A new `StatusNotifierItem` was added.
-    Add(String, Box<StatusNotifierItem>),
-    /// An update was received for an existing `StatusNotifierItem`.
-    /// This could be either an update to the item itself,
-    /// or an update to the associated menu.
-    Update(String, UpdateEvent),
-    /// A `StatusNotifierItem` was unregistered.
-    Remove(String),
-}
+use crate::event::{ActivateRequest, Event, UpdateEvent};
 
-/// The specific change associated with an update event.
-#[derive(Debug, Clone)]
-pub enum UpdateEvent {
-    AttentionIcon(Option<String>),
-    Icon(Option<String>),
-    OverlayIcon(Option<String>),
-    Status(Status),
-    Title(Option<String>),
-    Tooltip(Option<Tooltip>),
-    /// A menu layout has changed.
-    /// The entire layout is sent.
-    Menu(TrayMenu),
-    /// One or more menu properties have changed.
-    /// Only the updated properties are sent.
-    MenuDiff(Vec<MenuDiff>),
-    /// A new menu has connected to the item.
-    /// Its name on bus is sent.
-    MenuConnect(String),
-}
-
-/// A request to 'activate' one of the menu items,
-/// typically sent when it is clicked.
-#[derive(Debug, Clone)]
-pub enum ActivateRequest {
-    /// Submenu ID
-    MenuItem {
-        address: String,
-        menu_path: String,
-        submenu_id: i32,
-    },
-    /// Default activation for the tray.
-    /// The parameter(x and y) represents screen coordinates and is to be considered an hint to the item where to show eventual windows (if any).
-    Default { address: String, x: i32, y: i32 },
-    /// Secondary activation(less important) for the tray.
-    /// The parameter(x and y) represents screen coordinates and is to be considered an hint to the item where to show eventual windows (if any).
-    Secondary { address: String, x: i32, y: i32 },
-}
-
-type State = HashMap<String, (StatusNotifierItem, Option<TrayMenu>)>;
-
-const PROPERTIES_INTERFACE: &str = "org.kde.StatusNotifierItem";
+use super::{parse_address, State, PROPERTIES_INTERFACE};
 
 /// Client for watching the tray.
 #[derive(Debug)]
@@ -630,36 +577,5 @@ impl Client {
         }
 
         Ok(())
-    }
-}
-
-fn parse_address(address: &str) -> (&str, String) {
-    address
-        .split_once('/')
-        .map_or((address, String::from("/StatusNotifierItem")), |(d, p)| {
-            (d, format!("/{p}"))
-        })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_unnamed() {
-        let address = ":1.58/StatusNotifierItem";
-        let (destination, path) = parse_address(address);
-
-        assert_eq!(":1.58", destination);
-        assert_eq!("/StatusNotifierItem", path);
-    }
-
-    #[test]
-    fn parse_named() {
-        let address = ":1.72/org/ayatana/NotificationItem/dropbox_client_1398";
-        let (destination, path) = parse_address(address);
-
-        assert_eq!(":1.72", destination);
-        assert_eq!("/org/ayatana/NotificationItem/dropbox_client_1398", path);
     }
 }
