@@ -9,9 +9,6 @@ categories = ["gui"]
 keywords = ["statusnotifieritem", "dbusmenu", "tokio", "tray"]
 
 [features]
-default = ["broadcast"]
-calloop-channel = ["dep:calloop"]
-broadcast = []
 dbusmenu-gtk3 = ["dep:gtk", "dep:dbusmenu-gtk3-sys"]
 
 [dependencies]
@@ -24,8 +21,6 @@ thiserror = "2.0.0"
 gtk = { version = "0.18.1", optional = true }
 dbusmenu-gtk3-sys = { version = "0.1.0", optional = true }
 zbus_macros = "5.1.1"
-calloop = { version = "0.14.2", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.41.1", features = ["rt-multi-thread"] }
-calloop = { version = "0.14.2" }
