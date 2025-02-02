@@ -1,12 +1,14 @@
 use std::{
     collections::HashMap,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
     task::Waker,
 };
 
 use cooked_waker::{IntoWaker, WakeRef};
-use futures::{Stream, StreamExt};
-use zbus::{fdo::NameOwnerChangedStream, proxy::SignalStream};
+use futures::{FutureExt, Stream, StreamExt};
+use zbus::{fdo::NameOwnerChangedStream, proxy::SignalStream, Connection};
 
 use crate::{
     client::Event,
@@ -14,19 +16,27 @@ use crate::{
         dbus_menu_proxy::LayoutUpdatedStream,
         notifier_watcher_proxy::StatusNotifierItemRegisteredStream,
     },
+    error::Result,
     handle::{to_layout_update_event, to_update_item_event},
 };
 
 /// Token is used to identify an item.
 /// destination example: ":1.52"
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Token {
+pub(crate) struct Token {
     destination: Arc<String>,
+}
+impl Token {
+    pub(crate) fn new(destination: String) -> Self {
+        Self {
+            destination: Arc::new(destination),
+        }
+    }
 }
 
 /// This represents the wake source of an item.
 #[derive(Debug, Clone)]
-enum ItemWakeFrom {
+pub(crate) enum ItemWakeFrom {
     Disconnect,
     PropertyChange,
     LayoutUpdate,
@@ -34,8 +44,9 @@ enum ItemWakeFrom {
 
 /// This represents the wake source of the loop.
 #[derive(Debug, Clone)]
-enum WakeFrom {
+pub(crate) enum WakeFrom {
     NewItem,
+    FutureEvent(usize),
     ItemUpdate {
         token: Token,
         item_wake_from: ItemWakeFrom,
@@ -43,7 +54,7 @@ enum WakeFrom {
 }
 
 #[derive(Debug)]
-struct WakerData {
+pub(crate) struct WakerData {
     ready_tokens: Vec<WakeFrom>,
     root_waker: Waker,
 }
@@ -58,9 +69,18 @@ struct WakerData {
 /// And the next time the loop is polled,
 /// it will drain the `ready_tokens` and directly poll the matching stream.
 #[derive(Debug, Clone)]
-struct LoopWaker {
+pub(crate) struct LoopWaker {
     waker_data: Arc<Mutex<WakerData>>,
     wake_from: WakeFrom,
+}
+impl LoopWaker {
+    pub(crate) fn new(waker_data: Arc<Mutex<WakerData>>, wake_from: WakeFrom) -> Waker {
+        Arc::new(Self {
+            waker_data,
+            wake_from,
+        })
+        .into_waker()
+    }
 }
 
 impl WakeRef for LoopWaker {
@@ -71,7 +91,7 @@ impl WakeRef for LoopWaker {
     }
 }
 
-struct Item {
+pub(crate) struct Item {
     disconnect_stream: NameOwnerChangedStream,
     property_change_stream: SignalStream<'static>,
     layout_updated_stream: LayoutUpdatedStream,
@@ -137,13 +157,36 @@ impl Item {
     }
 }
 
-struct LoopInner {
-    waker_data: Option<Arc<Mutex<WakerData>>>,
-    ternimated: bool,
-    polled: bool,
+pub(crate) struct FutureMap {
+    map: Vec<Option<Pin<Box<dyn Future<Output = Option<Event>>>>>>,
+}
+impl FutureMap {
+    pub(crate) fn preserve_space(&mut self) -> usize {
+        self.map
+            .iter()
+            .position(|f| f.is_none())
+            .unwrap_or_else(|| {
+                self.map.push(None);
+                self.map.len() - 1
+            })
+    }
+    pub(crate) fn get(
+        &mut self,
+        index: usize,
+    ) -> &mut Option<Pin<Box<dyn Future<Output = Option<Event>>>>> {
+        &mut self.map[index]
+    }
+}
 
-    watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
-    items: HashMap<Token, Item>,
+pub struct LoopInner {
+    pub(crate) waker_data: Option<Arc<Mutex<WakerData>>>,
+    pub(crate) ternimated: bool,
+    pub(crate) polled: bool,
+    pub(crate) futures: FutureMap,
+
+    pub(crate) connection: Connection,
+    pub(crate) watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
+    pub(crate) items: HashMap<Token, Item>,
     // NOTE: dbus_proxy.receive_name_acquired will not be added currently,
     // cosmic applet didn't do it.
 }
@@ -231,6 +274,22 @@ impl LoopInner {
     fn wake_from(&mut self, wake_from: WakeFrom) -> std::task::Poll<Option<Event>> {
         match wake_from {
             WakeFrom::NewItem => self.poll_item_stream(),
+            WakeFrom::FutureEvent(index) => {
+                let fut_place = self.futures.get(index);
+                let mut fut = fut_place.take().unwrap();
+                let waker_data = self.waker_data.clone().unwrap();
+                let wake_from = WakeFrom::FutureEvent(index);
+                let waker = Arc::new(LoopWaker {
+                    waker_data,
+                    wake_from,
+                })
+                .into_waker();
+                let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
+                if res.is_pending() {
+                    fut_place.replace(fut);
+                }
+                res
+            }
             WakeFrom::ItemUpdate {
                 token,
                 item_wake_from,
@@ -262,24 +321,11 @@ impl LoopInner {
             .poll_next_unpin(&mut cx)
             .map(|item| {
                 if let Some(item) = item {
-                    Some(self.handle_new_item(item))
+                    self.handle_new_item(item)
                 } else {
                     self.ternimated = true;
                     None
                 }
             })
-    }
-}
-
-impl LoopInner {
-    fn handle_new_item(
-        &mut self,
-        item: crate::dbus::notifier_watcher_proxy::StatusNotifierItemRegistered,
-    ) -> Event {
-        todo!()
-    }
-
-    fn handle_remove_item(&mut self, token: &Token, n: zbus::fdo::NameOwnerChanged) -> Event {
-        todo!()
     }
 }
