@@ -125,8 +125,9 @@ impl Item {
 }
 
 struct LoopInner {
-    waker_data: Arc<Mutex<WakerData>>,
+    waker_data: Option<Arc<Mutex<WakerData>>>,
     ternimated: bool,
+    polled: bool,
 
     /// watcher_proxy.receive_status_notifier_item_registered
     watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
@@ -143,25 +144,73 @@ impl Stream for LoopInner {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let data = self.waker_data.clone();
-        let mut waker_data = data.lock().unwrap();
-        waker_data.root_waker = cx.waker().clone();
-        let ready_events = waker_data
-            .ready_tokens
-            .drain(..)
-            .filter_map(|f| {
-                if let std::task::Poll::Ready(Some(e)) = self.wake_from(f) {
-                    Some(e)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<Event>>();
+        let ready_events = if !self.polled {
+            self.polled = true;
+            let waker_data = Arc::new(Mutex::new(WakerData {
+                ready_tokens: Vec::new(),
+                root_waker: cx.waker().clone(),
+            }));
+            self.waker_data = Some(waker_data.clone());
+
+            let mut polls = vec![];
+
+            self.items
+                .iter_mut()
+                .map(|(token, item)| {
+                    (
+                        token.clone(),
+                        item.poll_disconnect(token.clone(), waker_data.clone()),
+                        item.poll_property_change(token.clone(), waker_data.clone()),
+                        item.poll_layout_change(token.clone(), waker_data.clone()),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .for_each(|(token, dis, prop, layout)| {
+                    if let std::task::Poll::Ready(Some(ev)) =
+                        dis.map(|d| d.map(|d| self.handle_remove_item(&token, d)))
+                    {
+                        polls.push(ev);
+                    };
+
+                    if let std::task::Poll::Ready(Some(ev)) = prop {
+                        polls.push(ev);
+                    }
+
+                    if let std::task::Poll::Ready(Some(ev)) = layout {
+                        polls.push(ev);
+                    }
+                });
+
+            if let std::task::Poll::Ready(Some(ev)) = self.poll_item_stream() {
+                polls.push(ev);
+            }
+
+            polls
+        } else {
+            let data = self.waker_data.clone().unwrap();
+            let mut waker_data = data.lock().unwrap();
+            waker_data.root_waker = cx.waker().clone();
+            waker_data
+                .ready_tokens
+                .drain(..)
+                .filter_map(|f| {
+                    if let std::task::Poll::Ready(Some(e)) = self.wake_from(f) {
+                        Some(e)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<Event>>()
+        };
 
         if self.ternimated {
-            return std::task::Poll::Ready(None);
+            std::task::Poll::Ready(None)
+        } else if ready_events.is_empty() {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(Some(ready_events))
         }
-        todo!()
     }
 }
 
@@ -174,7 +223,7 @@ impl LoopInner {
                 item_wake_from,
             } => {
                 let item = self.items.get_mut(&token).unwrap();
-                let waker_data = self.waker_data.clone();
+                let waker_data = self.waker_data.clone().unwrap();
 
                 match item_wake_from {
                     ItemWakeFrom::Disconnect => {
@@ -190,7 +239,7 @@ impl LoopInner {
 
     fn poll_item_stream(&mut self) -> std::task::Poll<Option<Event>> {
         let waker = Arc::new(LoopWaker {
-            waker_data: self.waker_data.clone(),
+            waker_data: self.waker_data.clone().unwrap(),
             wake_from: WakeFrom::NewItem,
         })
         .into_waker();
