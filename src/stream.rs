@@ -17,11 +17,14 @@ use crate::{
     handle::{to_layout_update_event, to_update_item_event},
 };
 
+/// Token is used to identify an item.
+/// destination example: ":1.52"
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Token {
     destination: Arc<String>,
 }
 
+/// This represents the wake source of an item.
 #[derive(Debug, Clone)]
 enum ItemWakeFrom {
     Disconnect,
@@ -29,6 +32,7 @@ enum ItemWakeFrom {
     LayoutUpdate,
 }
 
+/// This represents the wake source of the loop.
 #[derive(Debug, Clone)]
 enum WakeFrom {
     NewItem,
@@ -44,6 +48,15 @@ struct WakerData {
     root_waker: Waker,
 }
 
+/// This is the core.
+/// It will be distributed to all the streams,
+/// They all share one common WakerData.
+///
+/// Once the waker is called, it will record which source it is been called from,
+/// into the `ready_tokens`.
+///
+/// And the next time the loop is polled,
+/// it will drain the `ready_tokens` and directly poll the matching stream.
 #[derive(Debug, Clone)]
 struct LoopWaker {
     waker_data: Arc<Mutex<WakerData>>,
@@ -129,9 +142,7 @@ struct LoopInner {
     ternimated: bool,
     polled: bool,
 
-    /// watcher_proxy.receive_status_notifier_item_registered
     watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
-    /// key: destination (":1.52")
     items: HashMap<Token, Item>,
     // NOTE: dbus_proxy.receive_name_acquired will not be added currently,
     // cosmic applet didn't do it.
@@ -145,6 +156,8 @@ impl Stream for LoopInner {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         let ready_events = if !self.polled {
+            // first time poll
+
             self.polled = true;
             let waker_data = Arc::new(Mutex::new(WakerData {
                 ready_tokens: Vec::new(),
