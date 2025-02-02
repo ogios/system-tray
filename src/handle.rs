@@ -1,22 +1,95 @@
-use std::sync::Arc;
-
-use futures::FutureExt;
+use futures::{FutureExt, StreamExt};
 use tracing::error;
-use zbus::{fdo::PropertiesProxy, names::InterfaceName, Message};
-
-use crate::{
-    client::Event,
-    dbus::{dbus_menu_proxy::LayoutUpdated, DBusProps},
-    error::Result,
-    item::StatusNotifierItem,
-    stream::{LoopInner, LoopWaker, Token, WakeFrom},
+use zbus::{
+    fdo::{DBusProxy, NameOwnerChangedStream, PropertiesProxy},
+    names::InterfaceName,
+    proxy::SignalStream,
+    Message,
 };
 
-pub(crate) fn to_update_item_event(m: Message) -> Event {
+use crate::{
+    client::UpdateEvent,
+    dbus::{
+        dbus_menu_proxy::{DBusMenuProxy, LayoutUpdated, LayoutUpdatedStream},
+        notifier_item_proxy::StatusNotifierItemProxy,
+        DBusProps,
+    },
+    error::Result,
+    item::StatusNotifierItem,
+    menu::TrayMenu,
+    stream::{Item, LoopInner, LoopWaker, Token, WakeFrom},
+};
+
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub destination: String,
+    pub path: String,
+    pub t: EventType,
+}
+impl Event {
+    pub(crate) fn new(destination: String, path: String, t: EventType) -> Self {
+        Self {
+            destination,
+            path,
+            t,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum EventType {
+    /// A new `StatusNotifierItem` was added.
+    Add(Box<StatusNotifierItem>),
+    /// An update was received for an existing `StatusNotifierItem`.
+    /// This could be either an update to the item itself,
+    /// or an update to the associated menu.
+    Update(UpdateEvent),
+    /// A `StatusNotifierItem` was unregistered.
+    Remove,
+}
+
+struct LoopEventAddInner {
+    events: Vec<Event>,
+    destination: String,
+    disconnect_stream: NameOwnerChangedStream,
+    property_change_stream: SignalStream<'static>,
+    layout_updated_stream: Option<LayoutUpdatedStream>,
+}
+
+pub(crate) enum LoopEvent {
+    Add(Box<LoopEventAddInner>),
+    Remove(Event),
+    Updata(Event),
+}
+impl LoopEvent {
+    pub(crate) fn process_by_loop(self, lp: &mut LoopInner) -> Vec<Event> {
+        match self {
+            LoopEvent::Add(inner) => {
+                let LoopEventAddInner {
+                    events,
+                    disconnect_stream,
+                    property_change_stream,
+                    layout_updated_stream,
+                    destination,
+                } = *inner;
+                lp.new_item_added(
+                    &destination,
+                    disconnect_stream,
+                    property_change_stream,
+                    layout_updated_stream,
+                );
+                events
+            }
+            LoopEvent::Remove(event) | LoopEvent::Updata(event) => vec![event],
+        }
+    }
+}
+
+pub(crate) fn to_update_item_event(m: Message) -> Vec<Event> {
     todo!()
 }
 
-pub(crate) fn to_layout_update_event(up: LayoutUpdated) -> Event {
+pub(crate) fn to_layout_update_event(up: LayoutUpdated) -> Vec<Event> {
     todo!()
 }
 
@@ -49,11 +122,11 @@ impl LoopInner {
     pub(crate) fn handle_new_item(
         &mut self,
         item: crate::dbus::notifier_watcher_proxy::StatusNotifierItemRegistered,
-    ) -> Option<Event> {
+    ) -> Vec<Event> {
         let connection = self.connection.clone();
 
         let mut fut = Box::pin(async move {
-            let res: Result<(&str, StatusNotifierItem)> = async {
+            let res: Result<LoopEvent> = async {
                 let address = item.args().map(|args| args.service)?;
 
                 let (destination, path) = parse_address(address);
@@ -66,21 +139,61 @@ impl LoopInner {
 
                 let properties = get_item_properties(destination, &path, &properties_proxy).await?;
 
-                Ok((destination, properties))
+                let mut events = vec![Event::new(
+                    destination.to_string(),
+                    path.clone(),
+                    EventType::Add(properties.clone().into()),
+                )];
+
+                let notifier_item_proxy = StatusNotifierItemProxy::builder(&connection)
+                    .destination(destination)?
+                    .path(path.clone())?
+                    .build()
+                    .await?;
+                let dbus_proxy = DBusProxy::new(&connection).await?;
+                let disconnect_stream = dbus_proxy.receive_name_owner_changed().await?;
+                let property_change_stream =
+                    notifier_item_proxy.inner().receive_all_signals().await?;
+
+                let layout_updated_stream = if let Some(menu_path) = properties.menu {
+                    let destination = destination.to_string();
+
+                    let dbus_menu_proxy = DBusMenuProxy::builder(&connection)
+                        .destination(destination.as_str())?
+                        .path(menu_path)?
+                        .build()
+                        .await?;
+
+                    let menu = dbus_menu_proxy.get_layout(0, -1, &[]).await?;
+                    let menu = TrayMenu::try_from(menu)?;
+
+                    events.push(Event::new(
+                        destination.to_string(),
+                        path,
+                        EventType::Update(UpdateEvent::Menu(menu)),
+                    ));
+
+                    Some(dbus_menu_proxy.receive_layout_updated().await?)
+                } else {
+                    None
+                };
+
+                Ok(LoopEvent::Add(Box::new(LoopEventAddInner {
+                    events,
+                    destination: destination.to_string(),
+                    disconnect_stream,
+                    property_change_stream,
+                    layout_updated_stream,
+                })))
             }
             .await
             .inspect_err(|e| tracing::error!("Fail to handle_new_item: {e}"));
 
-            let (destination, properties) = res.ok()?;
-
-            Some(Event::Add(
-                destination.to_string(),
-                properties.clone().into(),
-            ))
+            res.ok()
         });
 
         let index = self.futures.preserve_space();
-        let waker = LoopWaker::new(
+        let waker = LoopWaker::new_waker(
             self.waker_data.clone().unwrap(),
             WakeFrom::FutureEvent(index),
         );
@@ -88,20 +201,84 @@ impl LoopInner {
 
         if let std::task::Poll::Ready(e) = res {
             if let Some(event) = e {
-                return Some(event);
+                return event.process_by_loop(self);
             }
         } else {
             self.futures.get(index).replace(fut);
         }
 
-        None
+        vec![]
+    }
+
+    pub(crate) fn wrap_new_item_added(
+        &mut self,
+        mut events: Vec<Event>,
+        destination: String,
+        disconnect_stream: NameOwnerChangedStream,
+        property_change_stream: SignalStream<'static>,
+        layout_updated_stream: Option<LayoutUpdatedStream>,
+    ) -> Vec<Event> {
+        let mut e = self.new_item_added(
+            &destination,
+            disconnect_stream,
+            property_change_stream,
+            layout_updated_stream,
+        );
+        events.append(&mut e);
+        events
+    }
+
+    pub(crate) fn new_item_added(
+        &mut self,
+        destination: &str,
+        disconnect_stream: NameOwnerChangedStream,
+        property_change_stream: SignalStream<'static>,
+        layout_updated_stream: Option<LayoutUpdatedStream>,
+    ) -> Vec<Event> {
+        let token = Token::new(destination.to_string());
+        let mut item = Item {
+            disconnect_stream,
+            property_change_stream,
+            layout_updated_stream,
+        };
+        // watch disconnect
+        let disconnect_stream = item
+            .poll_disconnect(token.clone(), self.waker_data.clone().unwrap())
+            .map(|f| {
+                f.map(|f| self.handle_remove_item(&token, f))
+                    .unwrap_or_default()
+            });
+        // this means the connection is disconnected before we insert
+        if let std::task::Poll::Ready(e) = disconnect_stream {
+            return e;
+        }
+
+        let mut es = vec![];
+
+        // watch property
+        let property_changed =
+            item.poll_property_change(token.clone(), self.waker_data.clone().unwrap());
+        if let std::task::Poll::Ready(mut e) = property_changed {
+            es.append(&mut e);
+        }
+
+        // watch layout
+        let layout_changed =
+            item.poll_layout_change(token.clone(), self.waker_data.clone().unwrap());
+        if let std::task::Poll::Ready(mut e) = layout_changed {
+            es.append(&mut e);
+        }
+
+        self.items.insert(token, item);
+
+        es
     }
 
     pub(crate) fn handle_remove_item(
         &mut self,
         token: &Token,
         n: zbus::fdo::NameOwnerChanged,
-    ) -> Event {
+    ) -> Vec<Event> {
         todo!()
     }
 }
