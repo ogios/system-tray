@@ -1,5 +1,4 @@
-use futures::{FutureExt, StreamExt};
-use tracing::error;
+use tracing::{debug, error};
 use zbus::{
     fdo::{DBusProxy, NameOwnerChangedStream, PropertiesProxy},
     names::InterfaceName,
@@ -12,6 +11,7 @@ use crate::{
     dbus::{
         dbus_menu_proxy::{DBusMenuProxy, LayoutUpdated, LayoutUpdatedStream},
         notifier_item_proxy::StatusNotifierItemProxy,
+        notifier_watcher_proxy::StatusNotifierWatcherProxy,
         DBusProps,
     },
     error::Result,
@@ -23,16 +23,11 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct Event {
     pub destination: String,
-    pub path: String,
     pub t: EventType,
 }
 impl Event {
-    pub(crate) fn new(destination: String, path: String, t: EventType) -> Self {
-        Self {
-            destination,
-            path,
-            t,
-        }
+    pub(crate) fn new(destination: String, t: EventType) -> Self {
+        Self { destination, t }
     }
 }
 
@@ -80,7 +75,11 @@ impl LoopEvent {
                 );
                 events
             }
-            LoopEvent::Remove(event) | LoopEvent::Updata(event) => vec![event],
+            LoopEvent::Remove(event) => {
+                lp.item_removed(&event.destination);
+                vec![event]
+            }
+            LoopEvent::Updata(event) => vec![event],
         }
     }
 }
@@ -125,7 +124,7 @@ impl LoopInner {
     ) -> Vec<Event> {
         let connection = self.connection.clone();
 
-        let mut fut = Box::pin(async move {
+        let fut = async move {
             let res: Result<LoopEvent> = async {
                 let address = item.args().map(|args| args.service)?;
 
@@ -141,7 +140,6 @@ impl LoopInner {
 
                 let mut events = vec![Event::new(
                     destination.to_string(),
-                    path.clone(),
                     EventType::Add(properties.clone().into()),
                 )];
 
@@ -169,7 +167,6 @@ impl LoopInner {
 
                     events.push(Event::new(
                         destination.to_string(),
-                        path,
                         EventType::Update(UpdateEvent::Menu(menu)),
                     ));
 
@@ -190,24 +187,12 @@ impl LoopInner {
             .inspect_err(|e| tracing::error!("Fail to handle_new_item: {e}"));
 
             res.ok()
-        });
+        };
 
-        let index = self.futures.preserve_space();
-        let waker = LoopWaker::new_waker(
-            self.waker_data.clone().unwrap(),
-            WakeFrom::FutureEvent(index),
-        );
-        let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
-
-        if let std::task::Poll::Ready(e) = res {
-            if let Some(event) = e {
-                return event.process_by_loop(self);
-            }
-        } else {
-            self.futures.get(index).replace(fut);
-        }
-
-        vec![]
+        self.futures
+            .try_put(fut, self.waker_data.clone().unwrap())
+            .map(|e| e.process_by_loop(self))
+            .unwrap_or_default()
     }
 
     pub(crate) fn wrap_new_item_added(
@@ -279,7 +264,47 @@ impl LoopInner {
         token: &Token,
         n: zbus::fdo::NameOwnerChanged,
     ) -> Vec<Event> {
-        todo!()
+        let destination = token.destination.clone();
+        let connection = self.connection.clone();
+
+        let fut = async move {
+            let args = n
+                .args()
+                .inspect_err(|e| error!("Failed to parse NameOwnerChanged: {e:?}"))
+                .ok()?;
+            let old = args.old_owner();
+            let new = args.new_owner();
+
+            if let (Some(old), None) = (old.as_ref(), new.as_ref()) {
+                if old == destination.as_str() {
+                    debug!("[{destination}] disconnected");
+
+                    let watcher_proxy = StatusNotifierWatcherProxy::new(&connection)
+                        .await
+                        .expect("Failed to open StatusNotifierWatcherProxy");
+
+                    if let Err(error) = watcher_proxy.unregister_status_notifier_item(old).await {
+                        error!("{error:?}");
+                    }
+
+                    return Some(LoopEvent::Remove(Event::new(
+                        destination.to_string(),
+                        EventType::Remove,
+                    )));
+                };
+            }
+
+            None
+        };
+
+        self.futures
+            .try_put(fut, self.waker_data.clone().unwrap())
+            .map(|e| e.process_by_loop(self))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn item_removed(&mut self, destination: &str) {
+        self.items.remove(&Token::new(destination.to_string()));
     }
 }
 

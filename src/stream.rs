@@ -7,7 +7,7 @@ use std::{
 };
 
 use cooked_waker::{IntoWaker, WakeRef};
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{pin_mut, FutureExt, Stream, StreamExt};
 use zbus::{fdo::NameOwnerChangedStream, proxy::SignalStream, Connection};
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
 /// destination example: ":1.52"
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Token {
-    destination: Arc<String>,
+    pub(crate) destination: Arc<String>,
 }
 impl Token {
     pub(crate) fn new(destination: String) -> Self {
@@ -175,6 +175,26 @@ impl FutureMap {
         index: usize,
     ) -> &mut Option<Pin<Box<dyn Future<Output = Option<LoopEvent>>>>> {
         &mut self.map[index]
+    }
+    pub(crate) fn try_put<T>(
+        &mut self,
+        fut: T,
+        waker_data: Arc<Mutex<WakerData>>,
+    ) -> Option<LoopEvent>
+    where
+        T: Future<Output = Option<LoopEvent>> + 'static,
+    {
+        let index = self.preserve_space();
+        let waker = LoopWaker::new_waker(waker_data, WakeFrom::FutureEvent(index));
+        let mut fut = Box::pin(fut);
+        let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
+
+        if let std::task::Poll::Ready(e) = res {
+            e
+        } else {
+            self.get(index).replace(Box::pin(fut));
+            None
+        }
     }
 }
 
