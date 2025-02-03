@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{Arc, Mutex},
-    task::Waker,
+    task::{Context, Waker},
 };
 
 use cooked_waker::{IntoWaker, WakeRef};
@@ -87,12 +87,14 @@ impl LoopWaker {
 
 impl WakeRef for LoopWaker {
     fn wake_by_ref(&self) {
+        println!("wake by ref: {:?}", self.wake_from);
         let mut data = self.waker_data.lock().unwrap();
         data.ready_tokens.push(self.wake_from.clone());
         data.root_waker.wake_by_ref();
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct Item {
     pub(crate) dbus_menu_proxy: Option<DBusMenuProxy<'static>>,
     pub(crate) properties_proxy: PropertiesProxy<'static>,
@@ -108,7 +110,7 @@ impl Item {
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
-    ) -> std::task::Poll<Option<zbus::fdo::NameOwnerChanged>> {
+    ) -> Vec<zbus::fdo::NameOwnerChanged> {
         let waker = Arc::new(LoopWaker {
             waker_data: waker_data.clone(),
             wake_from: WakeFrom::ItemUpdate {
@@ -119,14 +121,17 @@ impl Item {
         .into_waker();
         let mut cx = std::task::Context::from_waker(&waker);
 
-        self.disconnect_stream.poll_next_unpin(&mut cx)
+        loop_until_pending(&mut self.disconnect_stream, &mut cx)
+            .into_iter()
+            .flatten()
+            .collect()
     }
     pub(crate) fn poll_property_change(
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
         future_map: &mut FutureMap,
-    ) -> std::task::Poll<Option<LoopEvent>> {
+    ) -> Vec<LoopEvent> {
         let waker = LoopWaker::new_waker(
             waker_data.clone(),
             WakeFrom::ItemUpdate {
@@ -136,28 +141,27 @@ impl Item {
         );
         let mut cx = std::task::Context::from_waker(&waker);
 
-        self.property_change_stream
-            .poll_next_unpin(&mut cx)
-            .map(|m| {
-                m.map(|m| {
-                    future_map.try_put(
-                        to_update_item_event(
-                            token.destination.as_str().to_string(),
-                            m,
-                            self.properties_proxy.clone(),
-                        ),
-                        waker_data,
-                    )
-                })
-                .unwrap_or_default()
+        loop_until_pending(&mut self.property_change_stream, &mut cx)
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                future_map.try_put(
+                    to_update_item_event(
+                        token.destination.as_str().to_string(),
+                        m,
+                        self.properties_proxy.clone(),
+                    ),
+                    waker_data.clone(),
+                )
             })
+            .collect()
     }
     pub(crate) fn poll_layout_change(
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
         future_map: &mut FutureMap,
-    ) -> std::task::Poll<Option<LoopEvent>> {
+    ) -> Vec<LoopEvent> {
         let waker = LoopWaker::new_waker(
             waker_data.clone(),
             WakeFrom::ItemUpdate {
@@ -169,20 +173,22 @@ impl Item {
 
         self.layout_updated_stream
             .as_mut()
-            .unwrap()
-            .poll_next_unpin(&mut cx)
-            .map(|up| {
-                up.map(|_| {
-                    future_map.try_put(
-                        to_layout_update_event(
-                            token.destination.as_str().to_string(),
-                            self.dbus_menu_proxy.clone().unwrap(),
-                        ),
-                        waker_data,
-                    )
-                })
-                .unwrap_or_default()
+            .map(|st| {
+                loop_until_pending(st, &mut cx)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|_| {
+                        future_map.try_put(
+                            to_layout_update_event(
+                                token.destination.as_str().to_string(),
+                                self.dbus_menu_proxy.clone().unwrap(),
+                            ),
+                            waker_data.clone(),
+                        )
+                    })
+                    .collect()
             })
+            .unwrap_or_default()
     }
 }
 
@@ -282,14 +288,7 @@ impl Stream for LoopInner {
             waker_data
                 .ready_tokens
                 .drain(..)
-                .filter_map(|f| {
-                    if let std::task::Poll::Ready(e) = self.wake_from(f) {
-                        Some(e)
-                    } else {
-                        None
-                    }
-                })
-                .flatten()
+                .flat_map(|f| self.wake_from(f))
                 .collect::<Vec<Event>>()
         };
 
@@ -321,28 +320,34 @@ impl LoopInner {
             .collect::<Vec<_>>()
             .into_iter()
             .for_each(|(token, dis, prop, layout)| {
-                if let std::task::Poll::Ready(Some(mut ev)) =
-                    dis.map(|d| d.map(|d| self.handle_remove_item(&token, d)))
-                {
-                    polls.append(&mut ev);
-                };
+                polls.append(
+                    &mut dis
+                        .into_iter()
+                        .flat_map(|d| self.handle_remove_item(&token, d))
+                        .collect(),
+                );
 
-                if let std::task::Poll::Ready(Some(ev)) = prop {
-                    polls.append(&mut ev.process_by_loop(self));
-                }
+                polls.append(
+                    &mut prop
+                        .into_iter()
+                        .flat_map(|e| e.process_by_loop(self))
+                        .collect(),
+                );
 
-                if let std::task::Poll::Ready(Some(ev)) = layout {
-                    polls.append(&mut ev.process_by_loop(self));
-                }
+                polls.append(
+                    &mut layout
+                        .into_iter()
+                        .flat_map(|e| e.process_by_loop(self))
+                        .collect(),
+                );
             });
 
-        if let std::task::Poll::Ready(mut ev) = self.poll_item_stream() {
-            polls.append(&mut ev);
-        }
+        polls.append(&mut self.poll_item_stream());
 
         polls
     }
-    fn wake_from(&mut self, wake_from: WakeFrom) -> std::task::Poll<Vec<Event>> {
+    fn wake_from(&mut self, wake_from: WakeFrom) -> Vec<Event> {
+        println!("waker from: {wake_from:?}");
         match wake_from {
             WakeFrom::NewItem => self.poll_item_stream(),
             WakeFrom::FutureEvent(index) => {
@@ -353,10 +358,12 @@ impl LoopInner {
                     WakeFrom::FutureEvent(index),
                 );
                 let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
-                if res.is_pending() {
+                if let std::task::Poll::Ready(e) = res {
+                    e.map(|ev| ev.process_by_loop(self)).unwrap_or_default()
+                } else {
                     fut_place.replace(fut);
+                    vec![]
                 }
-                res.map(|e| e.map(|ev| ev.process_by_loop(self)).unwrap_or_default())
             }
             WakeFrom::ItemUpdate {
                 token,
@@ -366,41 +373,60 @@ impl LoopInner {
                 let waker_data = self.waker_data.clone().unwrap();
 
                 match item_wake_from {
-                    ItemWakeFrom::Disconnect => {
-                        let a = item.poll_disconnect(token.clone(), waker_data);
-                        a.map(|e| {
-                            e.map(|ev| self.handle_remove_item(&token, ev))
-                                .unwrap_or_default()
-                        })
-                    }
+                    ItemWakeFrom::Disconnect => item
+                        .poll_disconnect(token.clone(), waker_data)
+                        .into_iter()
+                        .flat_map(|d| self.handle_remove_item(&token, d))
+                        .collect(),
                     ItemWakeFrom::PropertyChange => item
                         .poll_property_change(token, waker_data, &mut self.futures)
-                        .map(|e| e.map(|e| e.process_by_loop(self)).unwrap_or_default()),
+                        .into_iter()
+                        .flat_map(|e| e.process_by_loop(self))
+                        .collect(),
                     ItemWakeFrom::LayoutUpdate => item
                         .poll_layout_change(token, waker_data, &mut self.futures)
-                        .map(|e| e.map(|e| e.process_by_loop(self)).unwrap_or_default()),
+                        .into_iter()
+                        .flat_map(|e| e.process_by_loop(self))
+                        .collect(),
                 }
             }
         }
     }
 
-    fn poll_item_stream(&mut self) -> std::task::Poll<Vec<Event>> {
-        let waker = Arc::new(LoopWaker {
-            waker_data: self.waker_data.clone().unwrap(),
-            wake_from: WakeFrom::NewItem,
-        })
-        .into_waker();
+    fn poll_item_stream(&mut self) -> Vec<Event> {
+        let waker = LoopWaker::new_waker(self.waker_data.clone().unwrap(), WakeFrom::NewItem);
         let mut cx = std::task::Context::from_waker(&waker);
 
-        self.watcher_stream_register_notifier_item_registered
-            .poll_next_unpin(&mut cx)
-            .map(|item| {
-                if let Some(item) = item {
-                    self.handle_new_item(item)
-                } else {
-                    self.ternimated = true;
-                    vec![]
-                }
-            })
+        loop_until_pending(
+            &mut self.watcher_stream_register_notifier_item_registered,
+            &mut cx,
+        )
+        .into_iter()
+        .flatten()
+        .flat_map(|item| self.handle_new_item(item))
+        .collect()
+
+        // self.watcher_stream_register_notifier_item_registered
+        //     .poll_next_unpin(&mut cx)
+        //     .map(|item| {
+        //         if let Some(item) = item {
+        //             self.handle_new_item(item)
+        //         } else {
+        //             self.ternimated = true;
+        //             vec![]
+        //         }
+        //     })
     }
+}
+
+fn loop_until_pending<T, St: Stream<Item = T> + Unpin>(
+    st: &mut St,
+    cx: &mut Context,
+) -> Vec<Option<T>> {
+    let mut outputs = vec![];
+    while let std::task::Poll::Ready(item) = st.poll_next_unpin(cx) {
+        outputs.push(item);
+    }
+
+    outputs
 }

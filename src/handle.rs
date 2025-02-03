@@ -41,12 +41,14 @@ pub enum EventType {
     Remove,
 }
 
+#[derive(Debug)]
 struct LoopEventAddInner {
     events: Vec<Event>,
     token: Token,
     item: Item,
 }
 
+#[derive(Debug)]
 pub(crate) enum LoopEvent {
     Add(Box<LoopEventAddInner>),
     Remove(Event),
@@ -284,18 +286,6 @@ impl LoopInner {
     }
 
     pub(crate) fn new_item_added(&mut self, token: Token, mut item: Item) -> Vec<Event> {
-        // watch disconnect
-        let disconnect_stream = item
-            .poll_disconnect(token.clone(), self.waker_data.clone().unwrap())
-            .map(|f| {
-                f.map(|f| self.handle_remove_item(&token, f))
-                    .unwrap_or_default()
-            });
-        // this means the connection is disconnected before we insert
-        if let std::task::Poll::Ready(e) = disconnect_stream {
-            return e;
-        }
-
         let mut es = vec![];
 
         // watch property
@@ -304,9 +294,12 @@ impl LoopInner {
             self.waker_data.clone().unwrap(),
             &mut self.futures,
         );
-        if let std::task::Poll::Ready(Some(e)) = property_changed {
-            es.append(&mut e.process_by_loop(self));
-        }
+        es.append(
+            &mut property_changed
+                .into_iter()
+                .flat_map(|e| e.process_by_loop(self))
+                .collect(),
+        );
 
         // watch layout
         let layout_changed = item.poll_layout_change(
@@ -314,11 +307,25 @@ impl LoopInner {
             self.waker_data.clone().unwrap(),
             &mut self.futures,
         );
-        if let std::task::Poll::Ready(Some(e)) = layout_changed {
-            es.append(&mut e.process_by_loop(self));
-        }
+        es.append(
+            &mut layout_changed
+                .into_iter()
+                .flat_map(|e| e.process_by_loop(self))
+                .collect(),
+        );
 
-        self.items.insert(token, item);
+        // watch disconnect
+        let disconnect_stream =
+            item.poll_disconnect(token.clone(), self.waker_data.clone().unwrap());
+
+        self.items.insert(token.clone(), item);
+
+        es.append(
+            &mut disconnect_stream
+                .into_iter()
+                .flat_map(|d| self.handle_remove_item(&token, d))
+                .collect(),
+        );
 
         es
     }
@@ -335,7 +342,8 @@ impl LoopInner {
             let args = n
                 .args()
                 .inspect_err(|e| error!("Failed to parse NameOwnerChanged: {e:?}"))
-                .ok()?;
+                .ok()
+                .unwrap();
             let old = args.old_owner();
             let new = args.new_owner();
 
