@@ -25,8 +25,8 @@
 /// ```
 mod dbus;
 
-mod handle;
-mod stream;
+pub mod handle;
+pub mod stream;
 
 /// Client for listening to item and menu events,
 /// and associated types.

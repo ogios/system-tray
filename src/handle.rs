@@ -64,8 +64,7 @@ impl LoopEvent {
                     token,
                     item,
                 } = *inner;
-                lp.new_item_added(token, item);
-                events
+                lp.wrap_new_item_added(events, token, item)
             }
             LoopEvent::Remove(event) => {
                 lp.item_removed(&event.destination);

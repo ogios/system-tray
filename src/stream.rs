@@ -7,7 +7,7 @@ use std::{
 };
 
 use cooked_waker::{IntoWaker, WakeRef};
-use futures::{pin_mut, FutureExt, Stream, StreamExt};
+use futures::{FutureExt, Stream, StreamExt};
 use zbus::{
     fdo::{NameOwnerChangedStream, PropertiesProxy},
     proxy::SignalStream,
