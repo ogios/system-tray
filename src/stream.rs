@@ -239,6 +239,24 @@ pub struct LoopInner {
     // NOTE: dbus_proxy.receive_name_acquired will not be added currently,
     // cosmic applet didn't do it.
 }
+impl LoopInner {
+    pub(crate) fn new(
+        connection: Connection,
+        watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
+        items: HashMap<Token, Item>,
+    ) -> Self {
+        Self {
+            waker_data: None,
+            ternimated: false,
+            polled: false,
+            futures: FutureMap { map: Vec::new() },
+
+            connection,
+            watcher_stream_register_notifier_item_registered,
+            items,
+        }
+    }
+}
 
 impl Stream for LoopInner {
     type Item = Vec<Event>;

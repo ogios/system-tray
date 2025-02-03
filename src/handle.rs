@@ -1,8 +1,7 @@
 use tracing::{debug, error, warn};
 use zbus::{
-    fdo::{DBusProxy, NameOwnerChangedStream, PropertiesProxy},
+    fdo::{DBusProxy, PropertiesProxy},
     names::InterfaceName,
-    proxy::SignalStream,
     zvariant::Structure,
     Message,
 };
@@ -10,15 +9,13 @@ use zbus::{
 use crate::{
     client::UpdateEvent,
     dbus::{
-        dbus_menu_proxy::{DBusMenuProxy, LayoutUpdated, LayoutUpdatedStream},
-        notifier_item_proxy::StatusNotifierItemProxy,
-        notifier_watcher_proxy::StatusNotifierWatcherProxy,
-        DBusProps, OwnedValueExt,
+        dbus_menu_proxy::DBusMenuProxy, notifier_item_proxy::StatusNotifierItemProxy,
+        notifier_watcher_proxy::StatusNotifierWatcherProxy, DBusProps, OwnedValueExt,
     },
     error::Result,
     item::{self, StatusNotifierItem},
     menu::TrayMenu,
-    stream::{Item, LoopInner, LoopWaker, Token, WakeFrom},
+    stream::{Item, LoopInner, Token},
 };
 
 #[derive(Debug, Clone)]
