@@ -16,7 +16,7 @@ use zbus::{
 
 use crate::{
     dbus::{
-        dbus_menu_proxy::LayoutUpdatedStream,
+        dbus_menu_proxy::{DBusMenuProxy, LayoutUpdatedStream},
         notifier_watcher_proxy::StatusNotifierItemRegisteredStream,
     },
     handle::{to_layout_update_event, to_update_item_event, Event, LoopEvent},
@@ -94,6 +94,7 @@ impl WakeRef for LoopWaker {
 }
 
 pub(crate) struct Item {
+    pub(crate) dbus_menu_proxy: Option<DBusMenuProxy<'static>>,
     pub(crate) properties_proxy: PropertiesProxy<'static>,
     pub(crate) disconnect_stream: NameOwnerChangedStream,
     pub(crate) property_change_stream: SignalStream<'static>,
@@ -125,7 +126,7 @@ impl Item {
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
         future_map: &mut FutureMap,
-    ) -> std::task::Poll<Vec<Event>> {
+    ) -> std::task::Poll<Option<LoopEvent>> {
         let waker = LoopWaker::new_waker(
             waker_data.clone(),
             WakeFrom::ItemUpdate {
@@ -149,20 +150,18 @@ impl Item {
                     )
                 })
                 .unwrap_or_default()
-            });
-
-        todo!()
+            })
     }
     pub(crate) fn poll_layout_change(
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
         future_map: &mut FutureMap,
-    ) -> std::task::Poll<Vec<Event>> {
+    ) -> std::task::Poll<Option<LoopEvent>> {
         let waker = LoopWaker::new_waker(
-            waker_data,
+            waker_data.clone(),
             WakeFrom::ItemUpdate {
-                token,
+                token: token.clone(),
                 item_wake_from: ItemWakeFrom::LayoutUpdate,
             },
         );
@@ -172,7 +171,18 @@ impl Item {
             .as_mut()
             .unwrap()
             .poll_next_unpin(&mut cx)
-            .map(|up| up.map(to_layout_update_event).unwrap_or_default())
+            .map(|up| {
+                up.map(|_| {
+                    future_map.try_put(
+                        to_layout_update_event(
+                            token.destination.as_str().to_string(),
+                            self.dbus_menu_proxy.clone().unwrap(),
+                        ),
+                        waker_data,
+                    )
+                })
+                .unwrap_or_default()
+            })
     }
 }
 
@@ -286,8 +296,8 @@ impl LoopInner {
                 (
                     token.clone(),
                     item.poll_disconnect(token.clone(), waker_data.clone()),
-                    item.poll_property_change(token.clone(), waker_data.clone()),
-                    item.poll_layout_change(token.clone(), waker_data.clone()),
+                    item.poll_property_change(token.clone(), waker_data.clone(), &mut self.futures),
+                    item.poll_layout_change(token.clone(), waker_data.clone(), &mut self.futures),
                 )
             })
             .collect::<Vec<_>>()
@@ -299,12 +309,12 @@ impl LoopInner {
                     polls.append(&mut ev);
                 };
 
-                if let std::task::Poll::Ready(mut ev) = prop {
-                    polls.append(&mut ev);
+                if let std::task::Poll::Ready(Some(ev)) = prop {
+                    polls.append(&mut ev.process_by_loop(self));
                 }
 
-                if let std::task::Poll::Ready(mut ev) = layout {
-                    polls.append(&mut ev);
+                if let std::task::Poll::Ready(Some(ev)) = layout {
+                    polls.append(&mut ev.process_by_loop(self));
                 }
             });
 
@@ -345,8 +355,12 @@ impl LoopInner {
                                 .unwrap_or_default()
                         })
                     }
-                    ItemWakeFrom::PropertyChange => item.poll_property_change(token, waker_data),
-                    ItemWakeFrom::LayoutUpdate => item.poll_layout_change(token, waker_data),
+                    ItemWakeFrom::PropertyChange => item
+                        .poll_property_change(token, waker_data, &mut self.futures)
+                        .map(|e| e.map(|e| e.process_by_loop(self)).unwrap_or_default()),
+                    ItemWakeFrom::LayoutUpdate => item
+                        .poll_layout_change(token, waker_data, &mut self.futures)
+                        .map(|e| e.map(|e| e.process_by_loop(self)).unwrap_or_default()),
                 }
             }
         }

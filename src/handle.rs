@@ -138,6 +138,15 @@ async fn get_update_event(
     }
 }
 
+async fn get_new_layout(destination: String, proxy: &DBusMenuProxy<'static>) -> Result<Event> {
+    let menu = proxy.get_layout(0, -1, &[]).await?;
+    let menu = TrayMenu::try_from(menu)?;
+    Ok(Event::new(
+        destination.clone(),
+        EventType::Update(UpdateEvent::Menu(menu)),
+    ))
+}
+
 pub(crate) async fn to_update_item_event(
     destination: String,
     m: Message,
@@ -150,8 +159,16 @@ pub(crate) async fn to_update_item_event(
     )))
 }
 
-pub(crate) fn to_layout_update_event(up: LayoutUpdated) -> Option<LoopEvent> {
-    todo!()
+pub(crate) async fn to_layout_update_event(
+    destination: String,
+    proxy: DBusMenuProxy<'static>,
+) -> Option<LoopEvent> {
+    let e = get_new_layout(destination, &proxy)
+        .await
+        .inspect_err(|e| error!("error get layout: {e}"))
+        .ok()?;
+
+    Some(LoopEvent::Updata(e))
 }
 
 const PROPERTIES_INTERFACE: &str = "org.kde.StatusNotifierItem";
@@ -215,33 +232,32 @@ impl LoopInner {
                 let property_change_stream =
                     notifier_item_proxy.inner().receive_all_signals().await?;
 
-                let layout_updated_stream = if let Some(menu_path) = properties.menu {
-                    let destination = destination.to_string();
+                let (layout_updated_stream, dbus_menu_proxy) =
+                    if let Some(menu_path) = properties.menu {
+                        let destination = destination.to_string();
 
-                    let dbus_menu_proxy = DBusMenuProxy::builder(&connection)
-                        .destination(destination.as_str())?
-                        .path(menu_path)?
-                        .build()
-                        .await?;
+                        let dbus_menu_proxy = DBusMenuProxy::builder(&connection)
+                            .destination(destination.clone())?
+                            .path(menu_path)?
+                            .build()
+                            .await?;
 
-                    let menu = dbus_menu_proxy.get_layout(0, -1, &[]).await?;
-                    let menu = TrayMenu::try_from(menu)?;
+                        events.push(get_new_layout(destination, &dbus_menu_proxy).await?);
 
-                    events.push(Event::new(
-                        destination.to_string(),
-                        EventType::Update(UpdateEvent::Menu(menu)),
-                    ));
-
-                    Some(dbus_menu_proxy.receive_layout_updated().await?)
-                } else {
-                    None
-                };
+                        (
+                            Some(dbus_menu_proxy.receive_layout_updated().await?),
+                            Some(dbus_menu_proxy),
+                        )
+                    } else {
+                        (None, None)
+                    };
 
                 Ok(LoopEvent::Add(Box::new(LoopEventAddInner {
                     events,
                     token: Token::new(destination.to_string()),
                     item: Item {
                         properties_proxy,
+                        dbus_menu_proxy,
                         disconnect_stream,
                         property_change_stream,
                         layout_updated_stream,
@@ -292,8 +308,8 @@ impl LoopInner {
             self.waker_data.clone().unwrap(),
             &mut self.futures,
         );
-        if let std::task::Poll::Ready(mut e) = property_changed {
-            es.append(&mut e);
+        if let std::task::Poll::Ready(Some(e)) = property_changed {
+            es.append(&mut e.process_by_loop(self));
         }
 
         // watch layout
@@ -302,8 +318,8 @@ impl LoopInner {
             self.waker_data.clone().unwrap(),
             &mut self.futures,
         );
-        if let std::task::Poll::Ready(mut e) = layout_changed {
-            es.append(&mut e);
+        if let std::task::Poll::Ready(Some(e)) = layout_changed {
+            es.append(&mut e.process_by_loop(self));
         }
 
         self.items.insert(token, item);
