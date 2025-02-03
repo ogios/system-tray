@@ -1,8 +1,9 @@
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 use zbus::{
     fdo::{DBusProxy, NameOwnerChangedStream, PropertiesProxy},
     names::InterfaceName,
     proxy::SignalStream,
+    zvariant::Structure,
     Message,
 };
 
@@ -12,10 +13,10 @@ use crate::{
         dbus_menu_proxy::{DBusMenuProxy, LayoutUpdated, LayoutUpdatedStream},
         notifier_item_proxy::StatusNotifierItemProxy,
         notifier_watcher_proxy::StatusNotifierWatcherProxy,
-        DBusProps,
+        DBusProps, OwnedValueExt,
     },
     error::Result,
-    item::StatusNotifierItem,
+    item::{self, StatusNotifierItem},
     menu::TrayMenu,
     stream::{Item, LoopInner, LoopWaker, Token, WakeFrom},
 };
@@ -45,10 +46,8 @@ pub enum EventType {
 
 struct LoopEventAddInner {
     events: Vec<Event>,
-    destination: String,
-    disconnect_stream: NameOwnerChangedStream,
-    property_change_stream: SignalStream<'static>,
-    layout_updated_stream: Option<LayoutUpdatedStream>,
+    token: Token,
+    item: Item,
 }
 
 pub(crate) enum LoopEvent {
@@ -62,17 +61,10 @@ impl LoopEvent {
             LoopEvent::Add(inner) => {
                 let LoopEventAddInner {
                     events,
-                    disconnect_stream,
-                    property_change_stream,
-                    layout_updated_stream,
-                    destination,
+                    token,
+                    item,
                 } = *inner;
-                lp.new_item_added(
-                    &destination,
-                    disconnect_stream,
-                    property_change_stream,
-                    layout_updated_stream,
-                );
+                lp.new_item_added(token, item);
                 events
             }
             LoopEvent::Remove(event) => {
@@ -84,11 +76,81 @@ impl LoopEvent {
     }
 }
 
-pub(crate) fn to_update_item_event(m: Message) -> Vec<Event> {
-    todo!()
+async fn get_update_event(
+    change: Message,
+    properties_proxy: &PropertiesProxy<'_>,
+) -> Option<UpdateEvent> {
+    let header = change.header();
+    let member = header.member()?;
+
+    let property_name = match member.as_str() {
+        "NewAttentionIcon" => "AttentionIconName",
+        "NewIcon" => "IconName",
+        "NewOverlayIcon" => "OverlayIconName",
+        "NewStatus" => "Status",
+        "NewTitle" => "Title",
+        "NewToolTip" => "ToolTip",
+        _ => &member.as_str()["New".len()..],
+    };
+
+    let res = properties_proxy
+        .get(
+            InterfaceName::from_static_str(PROPERTIES_INTERFACE)
+                .expect("to be valid interface name"),
+            property_name,
+        )
+        .await;
+
+    let property = match res {
+        Ok(property) => property,
+        Err(err) => {
+            error!("error fetching property '{property_name}': {err:?}");
+            return None;
+        }
+    };
+
+    debug!("received tray item update: {member} -> {property:?}");
+
+    use UpdateEvent::*;
+    match member.as_str() {
+        "NewAttentionIcon" => Some(AttentionIcon(property.to_string().ok())),
+        "NewIcon" => Some(Icon(property.to_string().ok())),
+        "NewOverlayIcon" => Some(OverlayIcon(property.to_string().ok())),
+        "NewStatus" => Some(Status(
+            property
+                .downcast_ref::<&str>()
+                .ok()
+                .map(item::Status::from)
+                .unwrap_or_default(),
+        )),
+        "NewTitle" => Some(Title(property.to_string().ok())),
+        "NewToolTip" => Some(Tooltip({
+            property
+                .downcast_ref::<&Structure>()
+                .ok()
+                .map(crate::item::Tooltip::try_from)?
+                .ok()
+        })),
+        _ => {
+            warn!("received unhandled update event: {member}");
+            None
+        }
+    }
 }
 
-pub(crate) fn to_layout_update_event(up: LayoutUpdated) -> Vec<Event> {
+pub(crate) async fn to_update_item_event(
+    destination: String,
+    m: Message,
+    proxy: PropertiesProxy<'static>,
+) -> Option<LoopEvent> {
+    let e = get_update_event(m, &proxy).await?;
+    Some(LoopEvent::Updata(Event::new(
+        destination,
+        EventType::Update(e),
+    )))
+}
+
+pub(crate) fn to_layout_update_event(up: LayoutUpdated) -> Option<LoopEvent> {
     todo!()
 }
 
@@ -177,10 +239,13 @@ impl LoopInner {
 
                 Ok(LoopEvent::Add(Box::new(LoopEventAddInner {
                     events,
-                    destination: destination.to_string(),
-                    disconnect_stream,
-                    property_change_stream,
-                    layout_updated_stream,
+                    token: Token::new(destination.to_string()),
+                    item: Item {
+                        properties_proxy,
+                        disconnect_stream,
+                        property_change_stream,
+                        layout_updated_stream,
+                    },
                 })))
             }
             .await
@@ -198,34 +263,15 @@ impl LoopInner {
     pub(crate) fn wrap_new_item_added(
         &mut self,
         mut events: Vec<Event>,
-        destination: String,
-        disconnect_stream: NameOwnerChangedStream,
-        property_change_stream: SignalStream<'static>,
-        layout_updated_stream: Option<LayoutUpdatedStream>,
+        token: Token,
+        item: Item,
     ) -> Vec<Event> {
-        let mut e = self.new_item_added(
-            &destination,
-            disconnect_stream,
-            property_change_stream,
-            layout_updated_stream,
-        );
+        let mut e = self.new_item_added(token, item);
         events.append(&mut e);
         events
     }
 
-    pub(crate) fn new_item_added(
-        &mut self,
-        destination: &str,
-        disconnect_stream: NameOwnerChangedStream,
-        property_change_stream: SignalStream<'static>,
-        layout_updated_stream: Option<LayoutUpdatedStream>,
-    ) -> Vec<Event> {
-        let token = Token::new(destination.to_string());
-        let mut item = Item {
-            disconnect_stream,
-            property_change_stream,
-            layout_updated_stream,
-        };
+    pub(crate) fn new_item_added(&mut self, token: Token, mut item: Item) -> Vec<Event> {
         // watch disconnect
         let disconnect_stream = item
             .poll_disconnect(token.clone(), self.waker_data.clone().unwrap())
@@ -241,15 +287,21 @@ impl LoopInner {
         let mut es = vec![];
 
         // watch property
-        let property_changed =
-            item.poll_property_change(token.clone(), self.waker_data.clone().unwrap());
+        let property_changed = item.poll_property_change(
+            token.clone(),
+            self.waker_data.clone().unwrap(),
+            &mut self.futures,
+        );
         if let std::task::Poll::Ready(mut e) = property_changed {
             es.append(&mut e);
         }
 
         // watch layout
-        let layout_changed =
-            item.poll_layout_change(token.clone(), self.waker_data.clone().unwrap());
+        let layout_changed = item.poll_layout_change(
+            token.clone(),
+            self.waker_data.clone().unwrap(),
+            &mut self.futures,
+        );
         if let std::task::Poll::Ready(mut e) = layout_changed {
             es.append(&mut e);
         }

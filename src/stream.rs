@@ -8,7 +8,11 @@ use std::{
 
 use cooked_waker::{IntoWaker, WakeRef};
 use futures::{pin_mut, FutureExt, Stream, StreamExt};
-use zbus::{fdo::NameOwnerChangedStream, proxy::SignalStream, Connection};
+use zbus::{
+    fdo::{NameOwnerChangedStream, PropertiesProxy},
+    proxy::SignalStream,
+    Connection,
+};
 
 use crate::{
     dbus::{
@@ -90,6 +94,7 @@ impl WakeRef for LoopWaker {
 }
 
 pub(crate) struct Item {
+    pub(crate) properties_proxy: PropertiesProxy<'static>,
     pub(crate) disconnect_stream: NameOwnerChangedStream,
     pub(crate) property_change_stream: SignalStream<'static>,
     pub(crate) layout_updated_stream: Option<LayoutUpdatedStream>,
@@ -119,34 +124,48 @@ impl Item {
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
+        future_map: &mut FutureMap,
     ) -> std::task::Poll<Vec<Event>> {
-        let waker = Arc::new(LoopWaker {
-            waker_data: waker_data.clone(),
-            wake_from: WakeFrom::ItemUpdate {
-                token,
+        let waker = LoopWaker::new_waker(
+            waker_data.clone(),
+            WakeFrom::ItemUpdate {
+                token: token.clone(),
                 item_wake_from: ItemWakeFrom::PropertyChange,
             },
-        })
-        .into_waker();
+        );
         let mut cx = std::task::Context::from_waker(&waker);
 
         self.property_change_stream
             .poll_next_unpin(&mut cx)
-            .map(|m| m.map(to_update_item_event).unwrap_or_default())
+            .map(|m| {
+                m.map(|m| {
+                    future_map.try_put(
+                        to_update_item_event(
+                            token.destination.as_str().to_string(),
+                            m,
+                            self.properties_proxy.clone(),
+                        ),
+                        waker_data,
+                    )
+                })
+                .unwrap_or_default()
+            });
+
+        todo!()
     }
     pub(crate) fn poll_layout_change(
         &mut self,
         token: Token,
         waker_data: Arc<Mutex<WakerData>>,
+        future_map: &mut FutureMap,
     ) -> std::task::Poll<Vec<Event>> {
-        let waker = Arc::new(LoopWaker {
-            waker_data: waker_data.clone(),
-            wake_from: WakeFrom::ItemUpdate {
+        let waker = LoopWaker::new_waker(
+            waker_data,
+            WakeFrom::ItemUpdate {
                 token,
                 item_wake_from: ItemWakeFrom::LayoutUpdate,
             },
-        })
-        .into_waker();
+        );
         let mut cx = std::task::Context::from_waker(&waker);
 
         self.layout_updated_stream
