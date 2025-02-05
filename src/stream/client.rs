@@ -106,22 +106,6 @@ impl Client {
             .await?;
 
         LoopInner::new(connection, watcher_proxy).await
-
-        // then lastly get all items
-        // it can take so long to fetch all items that we have to do this last,
-        // otherwise some incoming items get missed
-        // {
-        //     let initial_items = watcher_proxy.registered_status_notifier_items().await?;
-        //     debug!("initial items: {initial_items:?}");
-        //
-        //     for item in initial_items {
-        //         if let Err(err) =
-        //             Self::handle_item(&item, connection.clone(), tx.clone(), items.clone()).await
-        //         {
-        //             error!("{err}");
-        //         }
-        //     }
-        // }
     }
 
     async fn get_notifier_item_proxy(
