@@ -149,8 +149,8 @@ pub struct LoopInner {
     pub connection: Connection,
     pub watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
     pub items: HashMap<Token, Item>,
-    // NOTE: dbus_proxy.receive_name_acquired will not be added currently,
-    // cosmic applet didn't do it.
+    // NOTE: dbus_proxy.receive_name_acquired is not added currently,
+    // cosmic applet didn't do it, and i hardly find this event occurring.
 }
 impl LoopInner {
     pub(super) async fn new(
