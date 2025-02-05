@@ -205,9 +205,10 @@ impl Stream for LoopInner {
             let data = self.waker_data.clone().unwrap();
             let mut waker_data = data.lock().unwrap();
             waker_data.root_waker = cx.waker().clone();
-            waker_data
-                .ready_tokens
-                .drain(..)
+            let sources: Vec<WakeFrom> = waker_data.ready_tokens.drain(..).collect();
+            drop(waker_data);
+            sources
+                .into_iter()
                 .flat_map(|f| self.wake_from(f))
                 .collect::<Vec<Event>>()
         };
