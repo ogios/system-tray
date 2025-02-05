@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use system_tray::stream_client::Client;
+use system_tray::stream::Client;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

@@ -3,7 +3,6 @@ use crate::dbus::notifier_item_proxy::StatusNotifierItemProxy;
 use crate::dbus::notifier_watcher_proxy::StatusNotifierWatcherProxy;
 use crate::dbus::status_notifier_watcher::StatusNotifierWatcher;
 use crate::names;
-use crate::stream::LoopInner;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
@@ -12,6 +11,8 @@ use zbus::zvariant::Value;
 use zbus::Connection;
 
 use self::names::ITEM_OBJECT;
+
+use super::stream_loop::LoopInner;
 
 /// A request to 'activate' one of the menu items,
 /// typically sent when it is clicked.
