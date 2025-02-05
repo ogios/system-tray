@@ -4,7 +4,7 @@ use zbus::{fdo::PropertiesProxy, names::InterfaceName, zvariant::Structure, Mess
 use crate::{
     dbus::{dbus_menu_proxy::DBusMenuProxy, DBusProps, OwnedValueExt},
     error::Result,
-    event::{Event, EventType, UpdateEvent},
+    event::{Event, UpdateEvent},
     item::{self, StatusNotifierItem},
     menu::TrayMenu,
 };
@@ -12,10 +12,7 @@ use crate::{
 pub async fn get_new_layout(destination: String, proxy: &DBusMenuProxy<'static>) -> Result<Event> {
     let menu = proxy.get_layout(0, -1, &[]).await?;
     let menu = TrayMenu::try_from(menu)?;
-    Ok(Event::new(
-        destination.clone(),
-        EventType::Update(UpdateEvent::Menu(menu)),
-    ))
+    Ok(Event::Update(destination.clone(), UpdateEvent::Menu(menu)))
 }
 
 const PROPERTIES_INTERFACE: &str = "org.kde.StatusNotifierItem";

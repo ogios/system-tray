@@ -3,27 +3,26 @@ use crate::{
     menu::{MenuDiff, TrayMenu},
 };
 
+/// An event emitted by the client
+/// representing a change from either the `StatusNotifierItem`
+/// or `DBusMenu` protocols.
 #[derive(Debug, Clone)]
-pub struct Event {
-    pub destination: String,
-    pub t: EventType,
-}
-impl Event {
-    pub(crate) fn new(destination: String, t: EventType) -> Self {
-        Self { destination, t }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum EventType {
+pub enum Event {
     /// A new `StatusNotifierItem` was added.
-    Add(Box<StatusNotifierItem>),
+    Add(String, Box<StatusNotifierItem>),
     /// An update was received for an existing `StatusNotifierItem`.
     /// This could be either an update to the item itself,
     /// or an update to the associated menu.
-    Update(UpdateEvent),
+    Update(String, UpdateEvent),
     /// A `StatusNotifierItem` was unregistered.
-    Remove,
+    Remove(String),
+}
+impl Event {
+    pub fn destination(&self) -> &str {
+        match self {
+            Event::Add(d, _) | Event::Update(d, _) | Event::Remove(d) => d,
+        }
+    }
 }
 
 /// The specific change associated with an update event.

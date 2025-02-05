@@ -27,7 +27,7 @@ impl LoopEvent {
                 lp.wrap_new_item_added(events, token, item)
             }
             LoopEvent::Remove(event) => {
-                lp.item_removed(&event.destination);
+                lp.item_removed(event.destination());
                 vec![event]
             }
             LoopEvent::Updata(event) => vec![event],

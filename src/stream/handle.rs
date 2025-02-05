@@ -10,7 +10,7 @@ use crate::{
         notifier_watcher_proxy::StatusNotifierWatcherProxy,
     },
     error::Result,
-    event::{Event, EventType},
+    event::Event,
     handle::{get_item_properties, get_new_layout, get_update_event, parse_address},
 };
 
@@ -25,10 +25,7 @@ pub async fn to_update_item_event(
     proxy: PropertiesProxy<'static>,
 ) -> Option<LoopEvent> {
     let e = get_update_event(m, &proxy).await?;
-    Some(LoopEvent::Updata(Event::new(
-        destination,
-        EventType::Update(e),
-    )))
+    Some(LoopEvent::Updata(Event::Update(destination, e)))
 }
 
 pub async fn to_layout_update_event(
@@ -64,9 +61,9 @@ impl LoopInner {
 
                 let properties = get_item_properties(destination, &path, &properties_proxy).await?;
 
-                let mut events = vec![Event::new(
+                let mut events = vec![Event::Add(
                     destination.to_string(),
-                    EventType::Add(properties.clone().into()),
+                    properties.clone().into(),
                 )];
 
                 let notifier_item_proxy = StatusNotifierItemProxy::builder(&connection)
@@ -208,10 +205,7 @@ impl LoopInner {
                         error!("{error:?}");
                     }
 
-                    return Some(LoopEvent::Remove(Event::new(
-                        destination.to_string(),
-                        EventType::Remove,
-                    )));
+                    return Some(LoopEvent::Remove(Event::Remove(destination.to_string())));
                 };
             }
 
