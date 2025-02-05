@@ -29,6 +29,7 @@ pub mod event;
 
 mod handle;
 
+#[cfg(feature = "unstable_stream")]
 pub mod stream;
 
 /// Client for listening to item and menu events,

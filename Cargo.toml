@@ -10,6 +10,7 @@ keywords = ["statusnotifieritem", "dbusmenu", "tokio", "tray"]
 
 [features]
 default = []
+unstable_stream = ["zbus/async-io"]
 dbusmenu-gtk3 = ["dep:gtk", "dep:dbusmenu-gtk3-sys"]
 
 [dependencies]
