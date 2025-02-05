@@ -1,7 +1,7 @@
 use tracing::{debug, error};
 use zbus::{
     fdo::{DBusProxy, PropertiesProxy},
-    Message,
+    Connection, Message,
 };
 
 use crate::{
@@ -40,6 +40,69 @@ pub async fn to_layout_update_event(
     Some(LoopEvent::Updata(e))
 }
 
+pub async fn to_new_item_event(address: &str, connection: &Connection) -> Option<LoopEvent> {
+    let res: Result<LoopEvent> = async {
+        let (destination, path) = parse_address(address);
+
+        let properties_proxy = PropertiesProxy::builder(connection)
+            .destination(destination.to_string())?
+            .path(path.clone())?
+            .build()
+            .await?;
+
+        let properties = get_item_properties(destination, &path, &properties_proxy).await?;
+
+        let mut events = vec![Event::Add(
+            destination.to_string(),
+            properties.clone().into(),
+        )];
+
+        let notifier_item_proxy = StatusNotifierItemProxy::builder(connection)
+            .destination(destination)?
+            .path(path.clone())?
+            .build()
+            .await?;
+        let dbus_proxy = DBusProxy::new(connection).await?;
+        let disconnect_stream = dbus_proxy.receive_name_owner_changed().await?;
+        let property_change_stream = notifier_item_proxy.inner().receive_all_signals().await?;
+
+        let (layout_updated_stream, dbus_menu_proxy) = if let Some(menu_path) = properties.menu {
+            let destination = destination.to_string();
+
+            let dbus_menu_proxy = DBusMenuProxy::builder(connection)
+                .destination(destination.clone())?
+                .path(menu_path)?
+                .build()
+                .await?;
+
+            events.push(get_new_layout(destination, &dbus_menu_proxy).await?);
+
+            (
+                Some(dbus_menu_proxy.receive_layout_updated().await?),
+                Some(dbus_menu_proxy),
+            )
+        } else {
+            (None, None)
+        };
+
+        Ok(LoopEvent::Add(Box::new(LoopEventAddInner {
+            events,
+            token: Token::new(destination.to_string()),
+            item: Item {
+                properties_proxy,
+                dbus_menu_proxy,
+                disconnect_stream,
+                property_change_stream,
+                layout_updated_stream,
+            },
+        })))
+    }
+    .await
+    .inspect_err(|e| tracing::error!("Fail to handle_new_item: {e}"));
+
+    res.ok()
+}
+
 impl LoopInner {
     pub fn handle_new_item(
         &mut self,
@@ -48,70 +111,12 @@ impl LoopInner {
         let connection = self.connection.clone();
 
         let fut = async move {
-            let res: Result<LoopEvent> = async {
-                let address = item.args().map(|args| args.service)?;
-
-                let (destination, path) = parse_address(address);
-
-                let properties_proxy = PropertiesProxy::builder(&connection)
-                    .destination(destination.to_string())?
-                    .path(path.clone())?
-                    .build()
-                    .await?;
-
-                let properties = get_item_properties(destination, &path, &properties_proxy).await?;
-
-                let mut events = vec![Event::Add(
-                    destination.to_string(),
-                    properties.clone().into(),
-                )];
-
-                let notifier_item_proxy = StatusNotifierItemProxy::builder(&connection)
-                    .destination(destination)?
-                    .path(path.clone())?
-                    .build()
-                    .await?;
-                let dbus_proxy = DBusProxy::new(&connection).await?;
-                let disconnect_stream = dbus_proxy.receive_name_owner_changed().await?;
-                let property_change_stream =
-                    notifier_item_proxy.inner().receive_all_signals().await?;
-
-                let (layout_updated_stream, dbus_menu_proxy) =
-                    if let Some(menu_path) = properties.menu {
-                        let destination = destination.to_string();
-
-                        let dbus_menu_proxy = DBusMenuProxy::builder(&connection)
-                            .destination(destination.clone())?
-                            .path(menu_path)?
-                            .build()
-                            .await?;
-
-                        events.push(get_new_layout(destination, &dbus_menu_proxy).await?);
-
-                        (
-                            Some(dbus_menu_proxy.receive_layout_updated().await?),
-                            Some(dbus_menu_proxy),
-                        )
-                    } else {
-                        (None, None)
-                    };
-
-                Ok(LoopEvent::Add(Box::new(LoopEventAddInner {
-                    events,
-                    token: Token::new(destination.to_string()),
-                    item: Item {
-                        properties_proxy,
-                        dbus_menu_proxy,
-                        disconnect_stream,
-                        property_change_stream,
-                        layout_updated_stream,
-                    },
-                })))
-            }
-            .await
-            .inspect_err(|e| tracing::error!("Fail to handle_new_item: {e}"));
-
-            res.ok()
+            let address = item
+                .args()
+                .map(|args| args.service)
+                .inspect_err(|e| error!("error getting service: {e}"))
+                .ok()?;
+            to_new_item_event(address, &connection).await
         };
 
         self.futures

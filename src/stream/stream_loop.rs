@@ -1,13 +1,12 @@
 use std::{
     collections::HashMap,
-    future::Future,
-    pin::Pin,
     sync::{Arc, Mutex},
     task::Context,
 };
 
 use cooked_waker::IntoWaker;
-use futures::{FutureExt, Stream, StreamExt};
+use futures::{Stream, StreamExt};
+use tracing::error;
 use zbus::{
     fdo::{NameOwnerChangedStream, PropertiesProxy},
     proxy::SignalStream,
@@ -17,13 +16,14 @@ use zbus::{
 use crate::{
     dbus::{
         dbus_menu_proxy::{DBusMenuProxy, LayoutUpdatedStream},
-        notifier_watcher_proxy::StatusNotifierItemRegisteredStream,
+        notifier_watcher_proxy::{StatusNotifierItemRegisteredStream, StatusNotifierWatcherProxy},
     },
+    error::Result,
     event::Event,
 };
 
 use super::{
-    future::LoopEvent,
+    future::{FutureMap, LoopEvent},
     handle::{to_layout_update_event, to_update_item_event},
     waker::{ItemWakeFrom, LoopWaker, WakeFrom, WakerData},
 };
@@ -140,43 +140,6 @@ impl Item {
     }
 }
 
-pub struct FutureMap {
-    map: Vec<Option<Pin<Box<dyn Future<Output = Option<LoopEvent>>>>>>,
-}
-impl FutureMap {
-    pub fn preserve_space(&mut self) -> usize {
-        self.map
-            .iter()
-            .position(|f| f.is_none())
-            .unwrap_or_else(|| {
-                self.map.push(None);
-                self.map.len() - 1
-            })
-    }
-    pub fn get(
-        &mut self,
-        index: usize,
-    ) -> &mut Option<Pin<Box<dyn Future<Output = Option<LoopEvent>>>>> {
-        &mut self.map[index]
-    }
-    pub fn try_put<T>(&mut self, fut: T, waker_data: Arc<Mutex<WakerData>>) -> Option<LoopEvent>
-    where
-        T: Future<Output = Option<LoopEvent>> + 'static,
-    {
-        let index = self.preserve_space();
-        let waker = LoopWaker::new_waker(waker_data, WakeFrom::FutureEvent(index));
-        let mut fut = Box::pin(fut);
-        let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
-
-        if let std::task::Poll::Ready(e) = res {
-            e
-        } else {
-            self.get(index).replace(Box::pin(fut));
-            None
-        }
-    }
-}
-
 pub struct LoopInner {
     pub waker_data: Option<Arc<Mutex<WakerData>>>,
     pub ternimated: bool,
@@ -190,21 +153,34 @@ pub struct LoopInner {
     // cosmic applet didn't do it.
 }
 impl LoopInner {
-    pub(super) fn new(
+    pub(super) async fn new(
         connection: Connection,
-        watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
-        items: HashMap<Token, Item>,
-    ) -> Self {
-        Self {
+        watcher_proxy: StatusNotifierWatcherProxy<'static>,
+    ) -> Result<Self> {
+        let watcher_stream_register_notifier_item_registered = watcher_proxy
+            .receive_status_notifier_item_registered()
+            .await?;
+
+        let mut futures = FutureMap::new();
+        futures.put(async move {
+            watcher_proxy
+                .registered_status_notifier_items()
+                .await
+                .inspect_err(|e| error!("error getting initial items: {e}"))
+                .ok()
+                .map(LoopEvent::Init)
+        });
+
+        Ok(Self {
             waker_data: None,
             ternimated: false,
             polled: false,
-            futures: FutureMap { map: Vec::new() },
+            futures,
 
             connection,
             watcher_stream_register_notifier_item_registered,
-            items,
-        }
+            items: HashMap::new(),
+        })
     }
 }
 
@@ -251,40 +227,9 @@ impl LoopInner {
         let waker_data = self.waker_data.clone().unwrap();
         let mut polls = vec![];
 
-        self.items
-            .iter_mut()
-            .map(|(token, item)| {
-                (
-                    token.clone(),
-                    item.poll_disconnect(token.clone(), waker_data.clone()),
-                    item.poll_property_change(token.clone(), waker_data.clone(), &mut self.futures),
-                    item.poll_layout_change(token.clone(), waker_data.clone(), &mut self.futures),
-                )
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .for_each(|(token, dis, prop, layout)| {
-                polls.append(
-                    &mut dis
-                        .into_iter()
-                        .flat_map(|d| self.handle_remove_item(&token, d))
-                        .collect(),
-                );
-
-                polls.append(
-                    &mut prop
-                        .into_iter()
-                        .flat_map(|e| e.process_by_loop(self))
-                        .collect(),
-                );
-
-                polls.append(
-                    &mut layout
-                        .into_iter()
-                        .flat_map(|e| e.process_by_loop(self))
-                        .collect(),
-                );
-            });
+        if let Some(le) = self.futures.try_poll(0, waker_data) {
+            polls.append(&mut le.process_by_loop(self));
+        }
 
         polls.append(&mut self.poll_item_stream());
 
@@ -294,21 +239,11 @@ impl LoopInner {
         println!("waker from: {wake_from:?}");
         match wake_from {
             WakeFrom::NewItem => self.poll_item_stream(),
-            WakeFrom::FutureEvent(index) => {
-                let fut_place = self.futures.get(index);
-                let mut fut = fut_place.take().unwrap();
-                let waker = LoopWaker::new_waker(
-                    self.waker_data.clone().unwrap(),
-                    WakeFrom::FutureEvent(index),
-                );
-                let res = fut.poll_unpin(&mut std::task::Context::from_waker(&waker));
-                if let std::task::Poll::Ready(e) = res {
-                    e.map(|ev| ev.process_by_loop(self)).unwrap_or_default()
-                } else {
-                    fut_place.replace(fut);
-                    vec![]
-                }
-            }
+            WakeFrom::FutureEvent(index) => self
+                .futures
+                .try_poll(index, self.waker_data.clone().unwrap())
+                .map(|le| le.process_by_loop(self))
+                .unwrap_or_default(),
             WakeFrom::ItemUpdate {
                 token,
                 item_wake_from,

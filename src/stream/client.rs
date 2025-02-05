@@ -3,7 +3,6 @@ use crate::dbus::notifier_item_proxy::StatusNotifierItemProxy;
 use crate::dbus::notifier_watcher_proxy::StatusNotifierWatcherProxy;
 use crate::dbus::status_notifier_watcher::StatusNotifierWatcher;
 use crate::names;
-use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 use tracing::{debug, error};
@@ -106,11 +105,7 @@ impl Client {
             .register_status_notifier_host(&wellknown)
             .await?;
 
-        let stream = watcher_proxy
-            .receive_status_notifier_item_registered()
-            .await?;
-
-        Ok(LoopInner::new(connection, stream, HashMap::new()))
+        LoopInner::new(connection, watcher_proxy).await
 
         // then lastly get all items
         // it can take so long to fetch all items that we have to do this last,
