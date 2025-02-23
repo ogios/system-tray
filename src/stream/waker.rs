@@ -18,6 +18,7 @@ pub enum ItemWakeFrom {
 /// This represents the wake source of the loop.
 #[derive(Debug, Clone)]
 pub enum WakeFrom {
+    NameAcquired,
     NewItem,
     FutureEvent(usize),
     ItemUpdate {

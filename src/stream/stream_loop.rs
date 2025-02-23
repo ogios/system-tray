@@ -8,7 +8,7 @@ use cooked_waker::IntoWaker;
 use futures::{Stream, StreamExt};
 use tracing::error;
 use zbus::{
-    fdo::{NameOwnerChangedStream, PropertiesProxy},
+    fdo::{DBusProxy, NameAcquiredStream, NameOwnerChangedStream, PropertiesProxy},
     proxy::SignalStream,
     Connection,
 };
@@ -20,6 +20,7 @@ use crate::{
     },
     error::Result,
     event::Event,
+    names,
 };
 
 use super::{
@@ -148,9 +149,8 @@ pub struct LoopInner {
 
     pub connection: Connection,
     pub watcher_stream_register_notifier_item_registered: StatusNotifierItemRegisteredStream,
+    pub name_acquired_stream: NameAcquiredStream,
     pub items: HashMap<Token, Item>,
-    // NOTE: dbus_proxy.receive_name_acquired is not added currently,
-    // cosmic applet didn't do it, and i hardly find this event occurring.
 }
 impl LoopInner {
     pub(super) async fn new(
@@ -171,6 +171,9 @@ impl LoopInner {
                 .map(LoopEvent::Init)
         });
 
+        let dbus_proxy = DBusProxy::new(&connection).await?;
+        let name_acquired_stream = dbus_proxy.receive_name_acquired().await?;
+
         Ok(Self {
             waker_data: None,
             ternimated: false,
@@ -179,6 +182,7 @@ impl LoopInner {
 
             connection,
             watcher_stream_register_notifier_item_registered,
+            name_acquired_stream,
             items: HashMap::new(),
         })
     }
@@ -233,12 +237,14 @@ impl LoopInner {
         }
 
         polls.append(&mut self.poll_item_stream());
+        polls.append(&mut self.poll_name_acquired_stream());
 
         polls
     }
     fn wake_from(&mut self, wake_from: WakeFrom) -> Vec<Event> {
         println!("waker from: {wake_from:?}");
         match wake_from {
+            WakeFrom::NameAcquired => self.poll_name_acquired_stream(),
             WakeFrom::NewItem => self.poll_item_stream(),
             WakeFrom::FutureEvent(index) => self
                 .futures
@@ -271,6 +277,29 @@ impl LoopInner {
                 }
             }
         }
+    }
+
+    fn poll_name_acquired_stream(&mut self) -> Vec<Event> {
+        let waker = LoopWaker::new_waker(self.waker_data.clone().unwrap(), WakeFrom::NameAcquired);
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        loop_until_pending(&mut self.name_acquired_stream, &mut cx)
+            .into_iter()
+            .flatten()
+            .find_map(|item| {
+                let body = item.args().unwrap();
+                if body.name == names::WATCHER_BUS {
+                    Some(
+                        self.items
+                            .drain()
+                            .map(|(token, _)| Event::Remove(String::clone(&token.destination)))
+                            .collect::<Vec<Event>>(),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
 
     fn poll_item_stream(&mut self) -> Vec<Event> {
