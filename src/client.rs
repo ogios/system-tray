@@ -184,7 +184,7 @@ impl Client {
                         .await
                         {
                             error!("{err}");
-                            break;
+                            continue;
                         }
                     }
                 }
@@ -385,27 +385,27 @@ impl Client {
                 }
                 Some(signal) = disconnect_stream.next() => {
                     let args = signal.args()?;
-                    let old = args.old_owner();
-                    let new = args.new_owner();
 
-                    if let (Some(old), None) = (old.as_ref(), new.as_ref()) {
-                        if old == destination {
-                            debug!("[{destination}{path}] disconnected");
+                    // A non-empty old owner means the item either disappeared or the
+                    // well-known name moved directly to another connection. In both cases,
+                    // this instance is no longer the one we started watching.
+                    if args.old_owner().is_some() && args.name() == destination {
+                        debug!("[{destination}{path}] disconnected");
 
-                            let watcher_proxy = StatusNotifierWatcherProxy::new(connection)
-                                .await
-                                .expect("Failed to open StatusNotifierWatcherProxy");
+                        let watcher_proxy = StatusNotifierWatcherProxy::new(connection)
+                            .await
+                            .expect("Failed to open StatusNotifierWatcherProxy");
 
-                            if let Err(error) = watcher_proxy.unregister_status_notifier_item(old).await {
-                                error!("{error:?}");
-                            }
-
-
-                            items.remove_item(destination);
-
-                            tx.send(Event::Remove(destination.to_string()))?;
-                            break Ok(());
+                        if let Err(error) =
+                            watcher_proxy.unregister_status_notifier_item(destination).await
+                        {
+                            error!("{error:?}");
                         }
+
+                        items.remove_item(destination);
+
+                        tx.send(Event::Remove(destination.to_string()))?;
+                        break Ok(());
                     }
                 }
             }

@@ -36,13 +36,8 @@ impl StatusNotifierWatcher {
         #[zbus(connection)] con: &Connection,
         #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
-        // TODO: right now, we convert everything to the unique bus name (something like :1.234).
-        //  However, it might make more sense to listen to the actual name they give us, so that if
-        //  the connection dissociates itself from the org.kde.StatusNotifierHost-{pid}-{nr} name
-        //  but still remains around, we drop them as a host.
-        //  (This also applies to RegisterStatusNotifierItem)
-
-        let (service, _) = parse_service(service, hdr, con).await?;
+        let (service, _) = parse_service(service, hdr)?;
+        let owner = get_service_owner(con, &service).await?;
         info!("new host: {}", service);
 
         let added_first = {
@@ -65,8 +60,9 @@ impl StatusNotifierWatcher {
             let hosts = self.hosts.clone();
             let signal_emitter = signal_emitter.to_owned();
             let con = con.to_owned();
+            let service = service.clone();
             async move {
-                if let Err(e) = wait_for_service_exit(&con, service.as_ref().into()).await {
+                if let Err(e) = wait_for_service_exit(&con, service.clone(), owner).await {
                     error!("failed to wait for service exit: {}", e);
                 }
                 info!("lost host: {}", service);
@@ -125,8 +121,8 @@ impl StatusNotifierWatcher {
         #[zbus(connection)] con: &Connection,
         #[zbus(signal_emitter)] signal_emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
-        let (service, objpath) = parse_service(service, hdr, con).await?;
-        let service = zbus::names::BusName::Unique(service);
+        let (service, objpath) = parse_service(service, hdr)?;
+        let owner = get_service_owner(con, &service).await?;
 
         let item = format!("{service}{objpath}");
 
@@ -149,8 +145,9 @@ impl StatusNotifierWatcher {
             let items = self.items.clone();
             let signal_emitter = signal_emitter.to_owned();
             let con = con.to_owned();
+            let service = service.clone();
             async move {
-                if let Err(e) = wait_for_service_exit(&con, service.as_ref()).await {
+                if let Err(e) = wait_for_service_exit(&con, service, owner).await {
                     error!("failed to wait for service exit: {}", e);
                 }
                 debug!("gone item: {}", &item);
@@ -184,13 +181,11 @@ impl StatusNotifierWatcher {
         &mut self,
         service: &str,
         #[zbus(header)] hdr: Header<'_>,
-        #[zbus(connection)] con: &Connection,
         #[zbus(signal_emitter)] context: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
         debug!("received item unregister: {service}");
 
-        let (service, objpath) = parse_service(service, hdr, con).await?;
-        let service = zbus::names::BusName::Unique(service);
+        let (service, objpath) = parse_service(service, hdr)?;
 
         let item = format!("{service}{objpath}");
 
@@ -296,22 +291,24 @@ impl StatusNotifierWatcher {
 ///
 /// The freedesktop.org specification has the format of this be just the bus name, however some
 /// status items pass non-conforming values. One common one is just the object path.
-async fn parse_service<'a>(
+///
+/// Well-known names are kept as-is rather than resolved to the unique bus name, as some items
+/// (notably Electron/Chromium) only serve their objects when addressed via their well-known name.
+fn parse_service<'a>(
     service: &'a str,
     hdr: Header<'_>,
-    con: &Connection,
-) -> zbus::fdo::Result<(zbus::names::UniqueName<'static>, &'a str)> {
+) -> zbus::fdo::Result<(zbus::names::BusName<'static>, &'a str)> {
     if service.starts_with('/') {
         // they sent us just the object path
         if let Some(sender) = hdr.sender() {
-            Ok((sender.to_owned(), service))
+            Ok((sender.to_owned().into(), service))
         } else {
             warn!("unknown sender");
             Err(zbus::fdo::Error::InvalidArgs("Unknown bus address".into()))
         }
     } else {
         // parse the bus name they gave us
-        let busname: zbus::names::BusName = match service.try_into() {
+        let busname: zbus::names::BusName<'_> = match service.try_into() {
             Ok(x) => x,
             Err(e) => {
                 warn!("received invalid bus name {:?}: {}", service, e);
@@ -319,42 +316,49 @@ async fn parse_service<'a>(
             }
         };
 
-        if let zbus::names::BusName::Unique(unique) = busname {
-            Ok((unique.to_owned(), names::ITEM_OBJECT))
-        } else {
-            // they gave us a "well-known name" like org.kde.StatusNotifierHost-81830-0, we need to
-            // convert this into the actual identifier for their bus (e.g. :1.234), so that even if
-            // they remove that well-known name it's fine.
+        Ok((busname.to_owned(), names::ITEM_OBJECT))
+    }
+}
+
+/// Resolve the connection that owns a service without changing the address advertised to hosts.
+async fn get_service_owner(
+    con: &Connection,
+    service: &zbus::names::BusName<'_>,
+) -> zbus::fdo::Result<zbus::names::UniqueName<'static>> {
+    match service {
+        zbus::names::BusName::Unique(owner) => Ok(owner.to_owned()),
+        zbus::names::BusName::WellKnown(_) => {
             let dbus = zbus::fdo::DBusProxy::new(con).await?;
-            match dbus.get_name_owner(busname).await {
-                Ok(owner) => Ok((owner.into_inner(), names::ITEM_OBJECT)),
-                Err(e) => {
-                    warn!("failed to get owner of {:?}: {}", service, e);
-                    Err(e)
-                }
-            }
+            dbus.get_name_owner(service.clone())
+                .await
+                .map(zbus::names::OwnedUniqueName::into_inner)
         }
     }
 }
 
-/// Wait for a `DBus` service to disappear
+/// Wait for the owner present at registration time to lose the service name.
 async fn wait_for_service_exit(
     con: &Connection,
     service: zbus::names::BusName<'_>,
+    owner: zbus::names::UniqueName<'_>,
 ) -> zbus::fdo::Result<()> {
     let dbus = zbus::fdo::DBusProxy::new(con).await?;
     let mut owner_changes = dbus
         .receive_name_owner_changed_with_args(&[(0, &service)])
         .await?;
 
-    if !dbus.name_has_owner(service.as_ref()).await? {
-        // service has already disappeared
-        return Ok(());
+    match dbus.get_name_owner(service.clone()).await {
+        Ok(current_owner) if current_owner.as_ref() == owner.as_ref() => {}
+        Ok(_) | Err(zbus::fdo::Error::NameHasNoOwner(_)) => {
+            // The service disappeared or changed owners before the signal listener was ready.
+            return Ok(());
+        }
+        Err(error) => return Err(error),
     }
 
     while let Some(sig) = owner_changes.next().await {
         let args = sig.args()?;
-        if args.new_owner().is_none() {
+        if args.old_owner().as_ref() == Some(&owner) {
             break;
         }
     }
